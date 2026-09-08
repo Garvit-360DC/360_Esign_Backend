@@ -1,0 +1,41 @@
+{
+  "name": "x360-esign",
+  "version": "0.1.0",
+  "private": true,
+  "description": "InstantDocs eSign API",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "preview:emails": "tsx scripts/preview-emails.ts",
+    "mail:test": "tsx scripts/send-test-email.ts",
+    "backfill:org": "tsx scripts/backfill-org-id.ts"
+  },
+  "dependencies": {
+    "axios": "^1.19.0",
+    "convertapi": "^1.15.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "mongoose": "^8.13.0",
+    "multer": "^2.0.2",
+    "nodemailer": "^9.1.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.2.108",
+    "pizzip": "^3.2.0",
+    "winston": "^3.17.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.13.10",
+    "@types/nodemailer": "^8.0.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

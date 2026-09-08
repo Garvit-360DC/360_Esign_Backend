@@ -1,0 +1,8 @@
+version: 3
+agent:
+  authtoken: 2n9QVyyM5PDYqiZn0HZQ5MwWADw_28qPeevQMoJSREi4PHN12
+endpoints:
+  - name: esgin
+    url: https://whiniest-jamila-tumultuously.ngrok-free.dev
+    upstream:
+      url: 80
