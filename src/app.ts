@@ -22,7 +22,9 @@ export function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   app.use("/health", healthRoutes);
-  app.use("/auth", authRoutes);
+  // At the root: authRoutes declares its own /auth/... and /getToken paths, matching the
+  // connector so the Word add-in needs no change.
+  app.use(authRoutes);
   app.use("/sign-requests", signRequestRoutes);
 
   app.use(unknownRoute);

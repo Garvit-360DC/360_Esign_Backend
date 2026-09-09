@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireOrg } from "../../middleware/org-auth.middleware";
+import { sfAuthMiddleware } from "../../middleware/sfAuth.middleware";
 import { uploadDocument } from "../../middleware/upload.middleware";
 import {
   cancelSignRequest,
@@ -24,25 +24,26 @@ const router = Router();
 /*
  * Two audiences share this router.
  *
- * Sender routes belong to a Salesforce org and carry `requireOrg`, which scopes every query
- * to that org. Signer routes are reached from an emailed link by someone who has no org and
- * no account; their per-signer token is the credential, and putting `requireOrg` in front of
- * them would break every signing link in circulation. The draft document is served the same
- * way, because the prepare screen renders it in an <iframe> that cannot set headers.
+ * Sender routes belong to a Salesforce org and carry `sfAuthMiddleware`, which scopes every
+ * query to that org. Signer routes are reached from an emailed link by someone who has no
+ * org and no account; their per-signer token is the credential, and putting the middleware
+ * in front of them would break every signing link in circulation. The draft document is
+ * served the same way, because the prepare screen renders it in an element that cannot set
+ * headers.
  */
 
 // Drafts are declared before "/:id" so the literal segment is not swallowed by the param.
-router.post("/drafts", requireOrg, uploadDocument, createSignRequestDraft);
+router.post("/drafts", sfAuthMiddleware, uploadDocument, createSignRequestDraft);
 router.get("/drafts/:id/document", getSignRequestDraftDocument);
-router.post("/drafts/:id/send", requireOrg, sendSignRequestDraft);
+router.post("/drafts/:id/send", sfAuthMiddleware, sendSignRequestDraft);
 
-router.post("/", requireOrg, uploadDocument, createSignRequest);
-router.get("/", requireOrg, listSignRequests);
+router.post("/", sfAuthMiddleware, uploadDocument, createSignRequest);
+router.get("/", sfAuthMiddleware, listSignRequests);
 // Also ahead of "/:id", which would otherwise capture "stats" as an envelope id.
-router.get("/stats", requireOrg, getSignRequestStats);
-router.get("/:id", requireOrg, getSignRequest);
-router.post("/:id/cancel", requireOrg, cancelSignRequest);
-router.post("/:id/remind", requireOrg, remindSignRequest);
+router.get("/stats", sfAuthMiddleware, getSignRequestStats);
+router.get("/:id", sfAuthMiddleware, getSignRequest);
+router.post("/:id/cancel", sfAuthMiddleware, cancelSignRequest);
+router.post("/:id/remind", sfAuthMiddleware, remindSignRequest);
 
 // ---- Signer-facing: authorised by the per-signer token in the link ----
 router.get("/:id/session", getSignRequestSession);

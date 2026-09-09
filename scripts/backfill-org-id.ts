@@ -10,9 +10,13 @@
  * documents, which is the thing org scoping exists to prevent.
  */
 
+// The config module validates the whole environment on import; these only need to be present.
 process.env.CONVERTAPI_SECRET ||= "backfill";
-process.env.ORG_TOKEN_KEY ||= "0123456789abcdef";
-process.env.ORG_TOKEN_IV ||= "abcdef0123456789";
+process.env.SF_CLIENT_ID ||= "unused";
+process.env.SF_CLIENT_SECRET ||= "unused";
+process.env.SF_SERVER_CALLBACK_URI ||= "http://localhost:4600/sf/auth/callback";
+process.env.SF_REDIRECT_URI ||= "http://localhost:3001/oauth/callback";
+process.env.JWT_SECRET ||= "0123456789abcdef";
 
 const COLLECTIONS = ["sign_requests", "sign_request_drafts"] as const;
 

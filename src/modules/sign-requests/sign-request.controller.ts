@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { orgOf } from "../../middleware/org-auth.middleware";
+import { orgIdOf } from "../../middleware/sfAuth.middleware";
 import { sendSuccess } from "../../utils/api-response";
 import { AppError } from "../../utils/appError";
 import { asyncHandler } from "../../utils/async-handler";
@@ -54,7 +54,7 @@ export const createSignRequest = asyncHandler(async (req: Request, res: Response
 
   const signers = parseSignersField(req.body.signers);
   const result = await create({
-    orgId: orgOf(req).orgId,
+    orgId: orgIdOf(req),
     file: req.file.buffer,
     fileName: req.file.originalname,
     mimeType: req.file.mimetype || DOCX_MIME,
@@ -74,7 +74,7 @@ export const createSignRequestDraft = asyncHandler(async (req: Request, res: Res
   }
 
   const result = await createDraft({
-    orgId: orgOf(req).orgId,
+    orgId: orgIdOf(req),
     file: req.file.buffer,
     fileName: req.file.originalname,
     mimeType: req.file.mimetype || DOCX_MIME,
@@ -101,7 +101,7 @@ export const getSignRequestDraftDocument = asyncHandler(
 
 export const sendSignRequestDraft = asyncHandler(async (req: Request, res: Response) => {
   const body = parseSendDraftBody(req.body);
-  const result = await sendDraft(req.params.id, body.t, orgOf(req).orgId, {
+  const result = await sendDraft(req.params.id, body.t, orgIdOf(req), {
     signers: body.signers,
     fields: body.fields,
   });
@@ -110,27 +110,27 @@ export const sendSignRequestDraft = asyncHandler(async (req: Request, res: Respo
 
 export const listSignRequests = asyncHandler(async (req: Request, res: Response) => {
   const { limit, skip } = parseListQuery(req.query);
-  const { items, total } = await list(orgOf(req).orgId, limit, skip);
+  const { items, total } = await list(orgIdOf(req), limit, skip);
   return sendSuccess(res, { items, total, limit, skip });
 });
 
 export const getSignRequestStats = asyncHandler(async (req: Request, res: Response) => {
-  return sendSuccess(res, await stats(orgOf(req).orgId));
+  return sendSuccess(res, await stats(orgIdOf(req)));
 });
 
 export const getSignRequest = asyncHandler(async (req: Request, res: Response) => {
-  const result = await getById(req.params.id, orgOf(req).orgId);
+  const result = await getById(req.params.id, orgIdOf(req));
   return sendSuccess(res, result);
 });
 
 export const cancelSignRequest = asyncHandler(async (req: Request, res: Response) => {
-  const result = await cancel(req.params.id, orgOf(req).orgId);
+  const result = await cancel(req.params.id, orgIdOf(req));
   return sendSuccess(res, result);
 });
 
 export const remindSignRequest = asyncHandler(async (req: Request, res: Response) => {
   const { recipientId } = parseRemindBody(req.body);
-  const result = await remind(req.params.id, orgOf(req).orgId, recipientId);
+  const result = await remind(req.params.id, orgIdOf(req), recipientId);
   return sendSuccess(res, result);
 });
 

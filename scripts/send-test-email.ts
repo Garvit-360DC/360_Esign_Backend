@@ -12,8 +12,11 @@
 // The config module validates the whole environment on import, and this script has no use
 // for the converter or for org authentication.
 process.env.CONVERTAPI_SECRET ||= "mail-test";
-process.env.ORG_TOKEN_KEY ||= "0123456789abcdef";
-process.env.ORG_TOKEN_IV ||= "abcdef0123456789";
+process.env.SF_CLIENT_ID ||= "unused";
+process.env.SF_CLIENT_SECRET ||= "unused";
+process.env.SF_SERVER_CALLBACK_URI ||= "http://localhost:4600/sf/auth/callback";
+process.env.SF_REDIRECT_URI ||= "http://localhost:3001/oauth/callback";
+process.env.JWT_SECRET ||= "0123456789abcdef";
 
 async function main() {
   const to = process.argv[2]?.trim();

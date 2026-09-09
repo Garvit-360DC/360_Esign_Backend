@@ -12,12 +12,20 @@ const envSchema = z.object({
   PUBLIC_API_URL: z.string().url().default("http://localhost:4600"),
   CONVERTAPI_SECRET: z.string().min(1),
 
-  // Org authentication. AES-128-CBC needs exactly 16 bytes for each, and the length is
-  // enforced here rather than at first use so a bad value fails at boot, not mid-request.
-  ORG_TOKEN_KEY: z.string().length(16, "ORG_TOKEN_KEY must be exactly 16 characters"),
-  ORG_TOKEN_IV: z.string().length(16, "ORG_TOKEN_IV must be exactly 16 characters"),
-  /** Used when a caller omits the product-name header. */
-  DEFAULT_PRODUCT_NAME: z.string().min(1).default("360 SmartSign"),
+  // Salesforce OAuth, named as in the connector. One connected app serves both flows —
+  // note the connector's getToken reads SF_CLIENTID while its exchange reads SF_CLIENT_ID,
+  // which lets the two halves drift onto different apps. Here there is only one.
+  SF_CLIENT_ID: z.string().min(1),
+  SF_CLIENT_SECRET: z.string().min(1),
+  SF_LOGIN_URL: z.string().url().default("https://login.salesforce.com"),
+  SF_TEST_LOGIN_URL: z.string().url().default("https://test.salesforce.com"),
+  /** Where Salesforce returns the admin in the getToken flow. */
+  SF_SERVER_CALLBACK_URI: z.string().url(),
+  /** Default redirect_uri for the add-in's own exchange, when it does not send one. */
+  SF_REDIRECT_URI: z.string().url(),
+
+  /** Signs the app JWT. `Token_Key_Value` in the connector. */
+  JWT_SECRET: z.string().min(16, "JWT_SECRET must be at least 16 characters"),
 
   // Mail is optional. Without SMTP_HOST and MAIL_FROM the app runs exactly as before and
   // signing links are only handed back in the API response.

@@ -1,38 +1,32 @@
 import { Router } from "express";
-import type { Request, Response } from "express";
-import { sendSuccess } from "../../utils/api-response";
-import { AppError } from "../../utils/appError";
-import { asyncHandler } from "../../utils/async-handler";
-import { issueToken, normalizeProductName } from "./auth.service";
+import {
+  exchangeToken,
+  getToken,
+  handleCallback,
+  refreshJwt,
+  refreshToken,
+  verifyJwt,
+} from "./auth.controller";
+
+/**
+ * Mounted at the root so the paths match
+ * `360_File_Connector_Node/src/routes/auth.routes.js` exactly — the Word add-in already
+ * points at `/auth/token`, `/auth/refresh` and `/auth/refresh-jwt`.
+ *
+ * The callback is the one exception: it sits at `/sf/auth/callback`, which is what is
+ * registered against the connected app. It has no client depending on its path — Salesforce
+ * is told where to go by `SF_SERVER_CALLBACK_URI`, which must hold the same value.
+ */
 
 const router = Router();
 
-/**
- * Registers a Salesforce org and returns the token it must present on later requests.
- *
- * The org id may come from the `org-id` header or the body, matching how the connector's
- * Salesforce clients call the equivalent endpoint.
- */
-export const createOrgToken = asyncHandler(async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as { org_id?: string; orgId?: string; user_email?: string };
-  const header = req.headers["org-id"];
+router.post("/auth/token", exchangeToken);
+router.post("/auth/refresh", refreshToken);
+router.get("/sf/auth/callback", handleCallback);
+router.post("/auth/refresh-jwt", refreshJwt);
 
-  const orgId =
-    (typeof header === "string" ? header : "") || body.org_id || body.orgId || "";
-
-  if (!orgId.trim()) {
-    throw new AppError("org-id is required", 400, "VALIDATION_ERROR");
-  }
-
-  const result = await issueToken({
-    orgId,
-    productName: normalizeProductName(req.headers["product-name"]),
-    userEmail: body.user_email,
-  });
-
-  return sendSuccess(res, result);
-});
-
-router.post("/token", createOrgToken);
+// used by salesforce to get login URL and JWT Token
+router.post("/getToken", getToken);
+router.get("/verify-jwt", verifyJwt);
 
 export const authRoutes = router;
