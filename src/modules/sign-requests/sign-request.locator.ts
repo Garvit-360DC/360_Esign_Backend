@@ -40,14 +40,27 @@ const DESCENDER_RATIO = 0.25;
  */
 const ERASE_PADDING_EM = 0.12;
 
+/**
+ * How far past a placeholder picture its white-out reaches, in points.
+ *
+ * Covering the picture's exact rect is not enough. Renderers anti-alias both the picture's edge
+ * and the white rectangle's edge, and two soft edges drawn on the same boundary never blend back
+ * to solid white — a hairline of the placeholder's border survives, strongest where the edge falls
+ * between device pixels. Reaching past the edge makes those pixels fully covered.
+ *
+ * Two points is at least two device pixels wherever the document is viewed at 100% or more, and
+ * still less than the width of a space, so a word set beside the picture is left alone.
+ */
+const IMAGE_BLEED_PT = 2;
+
 export type LocatedPlaceholder = {
   page: number;
   /** Where the field goes. For a text token this is larger than the token, to fit a signature. */
   rect: FieldRect;
   /**
-   * What the placeholder itself occupies on the page, so its artwork can be painted out.
-   * The same as `rect` for a picture; the tight glyph box for a `{%role}` token — erasing the
-   * field box instead would take neighbouring words and the line above with it.
+   * What to paint over to hide the placeholder. For a picture, its rect plus a small bleed so no
+   * anti-aliased edge survives (see `IMAGE_BLEED_PT`); for a `{%role}` token, the tight glyph box —
+   * erasing the field box instead would take neighbouring words and the line above with it.
    */
   artwork: FieldRect;
 };
@@ -65,7 +78,7 @@ type Candidate = Box & {
   page: number;
   pageWidth: number;
   pageHeight: number;
-  /** The placeholder's own extent, when it differs from the field box. Pictures leave it unset. */
+  /** The area to erase, when it differs from the field box. Falls back to the box itself. */
   artwork?: Box;
 };
 
@@ -210,14 +223,24 @@ function collectImages(
       const height = Math.abs(ctm[3]);
       if (width === 0 || height === 0) continue;
 
+      const x = ctm[4];
+      const top = pageHeight - (ctm[5] + height);
+
       found.push({
         page,
-        x: ctm[4],
-        top: pageHeight - (ctm[5] + height),
+        x,
+        top,
         width,
         height,
         pageWidth,
         pageHeight,
+        // The field box keeps the picture's exact size; only the eraser reaches past its edge.
+        artwork: {
+          x: x - IMAGE_BLEED_PT,
+          top: top - IMAGE_BLEED_PT,
+          width: width + IMAGE_BLEED_PT * 2,
+          height: height + IMAGE_BLEED_PT * 2,
+        },
       });
     }
   }
