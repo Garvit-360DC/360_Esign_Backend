@@ -69,6 +69,40 @@ function toPdfRect(
   return { x: clampedX, y: clampedBottom, width, height };
 }
 
+/**
+ * Paints out the Word add-in's placeholder artwork, returning a new PDF.
+ *
+ * ConvertAPI turns each placeholder into part of the page, so without this the picture (or
+ * the literal `{%role}` token) stays visible wherever the sender moves or removes its box: in
+ * the prepare screen, in the signing ceremony, and in the signed document. Done once, when the
+ * converted PDF is first stored, the document carries no scaffolding and the field boxes are
+ * the only indication of where anything goes.
+ *
+ * This covers the artwork; it does not remove it from the content stream. A token stays in the
+ * text layer and can still be found by search.
+ */
+export async function erasePlaceholders(
+  pdf: Buffer,
+  artwork: { page: number; rect: FieldRect }[]
+): Promise<Buffer> {
+  if (artwork.length === 0) return pdf;
+
+  const document = await PDFDocument.load(new Uint8Array(pdf));
+  const pages = document.getPages();
+
+  for (const { page: pageNumber, rect } of artwork) {
+    const page = pages[pageNumber - 1];
+    if (!page) continue;
+
+    const { width, height } = page.getSize();
+    const box = toPdfRect(rect, width, height, "Placeholder");
+
+    page.drawRectangle({ ...box, color: rgb(1, 1, 1) });
+  }
+
+  return Buffer.from(await document.save());
+}
+
 /** Left and right breathing room inside a text box, in points. */
 const TEXT_PADDING = 2;
 const MAX_TEXT_SIZE = 12;

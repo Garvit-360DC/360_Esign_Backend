@@ -38,10 +38,36 @@ export type OrgDetails = {
   loginTypeSF?: string;
 };
 
+export const API_VERSION = "v62.0";
+
 export function getLoginUrl(environment?: string): string {
   return (environment || "").toLowerCase() === "sandbox"
     ? env.SF_TEST_LOGIN_URL
     : env.SF_LOGIN_URL;
+}
+
+/**
+ * Prefixes a custom object or field with the package namespace.
+ *
+ * Empty in a org where the objects were created by hand, which is how they exist today; a
+ * packaged install would set `SF_NAMESPACE_PREFIX` and every name shifts with it. The
+ * connector does the same through `X360_SMART_DOCS_PREFIX`.
+ */
+export function ns(name: string): string {
+  return `${env.SF_NAMESPACE_PREFIX}${name}`;
+}
+
+/** Strips the namespace back off, so callers can read fields by their bare name. */
+export function unNs<T extends Record<string, unknown>>(record: T): Record<string, unknown> {
+  const prefix = env.SF_NAMESPACE_PREFIX;
+  if (!prefix) return record;
+
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [
+      key.startsWith(prefix) ? key.slice(prefix.length) : key,
+      value,
+    ])
+  );
 }
 
 /** Surfaces the message Salesforce actually gave rather than "Request failed". */
@@ -213,4 +239,241 @@ export async function sfRequest<T = unknown>(
     current = await getSalesforceToken(current.org_id);
     return doCall();
   }
+}
+
+// ---- data access -----------------------------------------------------------
+
+/** Turns a Salesforce write failure into the message it actually gave. */
+function writeError(error: unknown, what: string): AppError {
+  if (axios.isAxiosError(error)) {
+    const body = error.response?.data as { message?: string; errorCode?: string }[] | undefined;
+    const first = Array.isArray(body) ? body[0] : undefined;
+
+    logger.error("Salesforce write failed", {
+      what,
+      status: error.response?.status,
+      body: JSON.stringify(body ?? {}).slice(0, 500),
+    });
+
+    if (first?.message) {
+      return new AppError(`${what}: ${first.message}`, 400, first.errorCode ?? "SALESFORCE_ERROR");
+    }
+  }
+
+  return salesforceError(error, `${what} failed in Salesforce.`);
+}
+
+/**
+ * Runs a SOQL query and returns every row.
+ *
+ * Follows `nextRecordsUrl` rather than stopping at the first 2000: a template's field rows
+ * are well under that, but a list of templates across a large org need not be.
+ */
+export async function soql<T>(session: OrgDetails, query: string): Promise<T[]> {
+  const records: T[] = [];
+  let path: string | null = `/services/data/${API_VERSION}/query?q=${encodeURIComponent(query)}`;
+
+  while (path) {
+    const page: AxiosResponse<{ records: T[]; nextRecordsUrl?: string; done: boolean }> =
+      await sfRequest(session, path);
+
+    records.push(...page.data.records);
+    path = page.data.done ? null : (page.data.nextRecordsUrl ?? null);
+  }
+
+  return records;
+}
+
+export async function createRecord(
+  session: OrgDetails,
+  objectName: string,
+  values: Record<string, unknown>
+): Promise<string> {
+  try {
+    const { data } = await sfRequest<{ id: string }>(
+      session,
+      `/services/data/${API_VERSION}/sobjects/${objectName}`,
+      { method: "post", data: values, headers: { "Content-Type": "application/json" } }
+    );
+    return data.id;
+  } catch (error) {
+    throw writeError(error, `Creating ${objectName}`);
+  }
+}
+
+export async function updateRecord(
+  session: OrgDetails,
+  objectName: string,
+  id: string,
+  values: Record<string, unknown>
+): Promise<void> {
+  try {
+    await sfRequest(session, `/services/data/${API_VERSION}/sobjects/${objectName}/${id}`, {
+      method: "patch",
+      data: values,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    throw writeError(error, `Updating ${objectName}`);
+  }
+}
+
+export async function deleteRecord(
+  session: OrgDetails,
+  objectName: string,
+  id: string
+): Promise<void> {
+  try {
+    await sfRequest(session, `/services/data/${API_VERSION}/sobjects/${objectName}/${id}`, {
+      method: "delete",
+    });
+  } catch (error) {
+    throw writeError(error, `Deleting ${objectName}`);
+  }
+}
+
+export type CompositeEntry = {
+  /** Referenced by later entries as `@{referenceId.id}`. */
+  referenceId: string;
+  objectName: string;
+  values: Record<string, unknown>;
+};
+
+/**
+ * Creates several records in one call, all or nothing.
+ *
+ * A template is a parent plus its recipients plus its boxes. Sent one at a time, a failure
+ * halfway leaves a half-built template in the org that nobody asked for; `allOrNone` makes
+ * the whole thing succeed or leave no trace.
+ */
+export async function compositeCreate(
+  session: OrgDetails,
+  entries: CompositeEntry[]
+): Promise<Record<string, string>> {
+  type Result = {
+    compositeResponse: {
+      referenceId: string;
+      httpStatusCode: number;
+      body: { id?: string; message?: string; errorCode?: string }[] | { id?: string };
+    }[];
+  };
+
+  const { data } = await sfRequest<Result>(
+    session,
+    `/services/data/${API_VERSION}/composite`,
+    {
+      method: "post",
+      headers: { "Content-Type": "application/json" },
+      data: {
+        allOrNone: true,
+        compositeRequest: entries.map((entry) => ({
+          method: "POST",
+          url: `/services/data/${API_VERSION}/sobjects/${entry.objectName}`,
+          referenceId: entry.referenceId,
+          body: entry.values,
+        })),
+      },
+    }
+  );
+
+  const ids: Record<string, string> = {};
+
+  for (const result of data.compositeResponse) {
+    if (result.httpStatusCode >= 300) {
+      // Every entry reports a failure when one fails, so name the one that actually broke.
+      const body = Array.isArray(result.body) ? result.body[0] : undefined;
+      if (body?.errorCode === "PROCESSING_HALTED") continue;
+
+      throw new AppError(
+        body?.message
+          ? `Saving to Salesforce failed at ${result.referenceId}: ${body.message}`
+          : "Saving to Salesforce failed.",
+        400,
+        body?.errorCode ?? "SALESFORCE_ERROR"
+      );
+    }
+
+    const body = Array.isArray(result.body) ? result.body[0] : result.body;
+    if (body?.id) ids[result.referenceId] = body.id;
+  }
+
+  return ids;
+}
+
+// ---- files -----------------------------------------------------------------
+
+/** Uploads bytes as a new ContentVersion and returns its id. */
+export async function uploadContentVersion(
+  session: OrgDetails,
+  file: { buffer: Buffer; fileName: string; title: string }
+): Promise<string> {
+  return createRecord(session, "ContentVersion", {
+    Title: file.title,
+    PathOnClient: file.fileName,
+    VersionData: file.buffer.toString("base64"),
+  });
+}
+
+/**
+ * Attaches an uploaded file to a record, so it appears in that record's Files related list.
+ *
+ * A `ContentDocumentLink` joins a **ContentDocument**, not the ContentVersion just created,
+ * so the document id has to be read back first. Without this the file exists in the org but
+ * is reachable only by id — the template record shows a text field and no visible document.
+ */
+export async function linkFileToRecord(
+  session: OrgDetails,
+  contentVersionId: string,
+  recordId: string
+): Promise<void> {
+  const [version] = await soql<{ ContentDocumentId: string }>(
+    session,
+    `SELECT ContentDocumentId FROM ContentVersion WHERE Id = '${contentVersionId}' LIMIT 1`
+  );
+
+  if (!version?.ContentDocumentId) {
+    throw new AppError("The uploaded file could not be found.", 404, "DOCUMENT_NOT_FOUND");
+  }
+
+  await createRecord(session, "ContentDocumentLink", {
+    ContentDocumentId: version.ContentDocumentId,
+    LinkedEntityId: recordId,
+    ShareType: "V",
+    Visibility: "AllUsers",
+  });
+}
+
+/**
+ * Downloads a ContentVersion's bytes.
+ *
+ * Two calls, as the connector's `getSalesforceFile` does: SOQL for the `VersionData` URL,
+ * then fetch that URL. The blob is not returned inline by the query.
+ */
+export async function downloadContentVersion(
+  session: OrgDetails,
+  contentVersionId: string
+): Promise<{ buffer: Buffer; fileExtension: string }> {
+  const [record] = await soql<{ VersionData: string; FileExtension: string }>(
+    session,
+    `SELECT VersionData, FileExtension FROM ContentVersion WHERE Id = '${contentVersionId}' LIMIT 1`
+  );
+
+  if (!record?.VersionData) {
+    throw new AppError(
+      "The template's document is no longer in Salesforce.",
+      404,
+      "DOCUMENT_NOT_FOUND"
+    );
+  }
+
+  const { data } = await sfRequest<ArrayBuffer>(session, record.VersionData, {
+    responseType: "arraybuffer",
+  });
+
+  return { buffer: Buffer.from(data), fileExtension: record.FileExtension };
+}
+
+/** Escapes a value for inlining into SOQL, so a quote in a name cannot change the query. */
+export function soqlEscape(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }

@@ -19,7 +19,7 @@ import {
   toPublicSignRequest,
 } from "./sign-request.mapper";
 import { detectSignatureFields, extractSignatureFields } from "./sign-request.placeholders";
-import { stampSignatures } from "./sign-request.stamp";
+import { erasePlaceholders, stampSignatures } from "./sign-request.stamp";
 import {
   createSignRequest,
   findById,
@@ -36,6 +36,7 @@ import type {
   CeremonySession,
   CreateSignRequestInput,
   DetectedPlaceholder,
+  FieldRect,
   DocumentInfo,
   DraftView,
   PlacedField,
@@ -242,10 +243,28 @@ function defaultPlacement(detected: DetectedPlaceholder[]): PlacedField[] {
 async function placeDetected(
   pdf: Buffer,
   detected: DetectedPlaceholder[]
-): Promise<{ pageCount: number; fields: PlacedField[]; needsPlacement: boolean }> {
+): Promise<{
+  pageCount: number;
+  fields: PlacedField[];
+  needsPlacement: boolean;
+  /** Where each placeholder's own artwork sits, to be painted out. Empty when location failed. */
+  artwork: { page: number; rect: FieldRect }[];
+}> {
   if (detected.length === 0) {
-    const pageCount = await withDeadline(countPages(pdf), LOCATE_TIMEOUT_MS);
-    return { pageCount: pageCount ?? 1, fields: [], needsPlacement: false };
+    // Guarded like the branch below. Reading a page count is the least important thing this
+    // function does, and it has no business failing an upload — it did exactly that when
+    // pdf.js started throwing on import.
+    let pageCount: number | null = null;
+
+    try {
+      pageCount = await withDeadline(countPages(pdf), LOCATE_TIMEOUT_MS);
+    } catch (error) {
+      logger.warn("Could not count the pages in the converted PDF", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return { pageCount: pageCount ?? 1, fields: [], needsPlacement: false, artwork: [] };
   }
 
   let result: Awaited<ReturnType<typeof locatePlaceholders>> | null = null;
@@ -262,7 +281,14 @@ async function placeDetected(
     logger.warn("Placeholder location did not finish; falling back to manual placement", {
       placeholders: detected.length,
     });
-    return { pageCount: 1, fields: defaultPlacement(detected), needsPlacement: true };
+    // Nothing to erase: location failed, so where the artwork sits is unknown. The banner on
+    // the prepare screen already tells the sender to move the boxes by hand.
+    return {
+      pageCount: 1,
+      fields: defaultPlacement(detected),
+      needsPlacement: true,
+      artwork: [],
+    };
   }
 
   return {
@@ -275,7 +301,44 @@ async function placeDetected(
       source: field.source,
     })),
     needsPlacement: false,
+    artwork: result.located.map((entry) => ({ page: entry.page, rect: entry.artwork })),
   };
+}
+
+/**
+ * Locates the add-in's placeholders in a freshly converted PDF and paints their artwork out.
+ *
+ * Shared by the upload path and by sending from a template, which both convert a `.docx` and
+ * both would otherwise leave the placeholder pictures on the page — visible behind any box the
+ * sender moves, in the signing ceremony, and in the signed document.
+ *
+ * The erase is best-effort: a placeholder left visible is cosmetic, and failing an upload over it
+ * would not be.
+ */
+export async function prepareConvertedPdf(
+  docx: Buffer,
+  pdf: Buffer
+): Promise<{
+  pdf: Buffer;
+  pageCount: number;
+  fields: PlacedField[];
+  needsPlacement: boolean;
+}> {
+  const detected = detectSignatureFields(docx);
+  const { pageCount, fields, needsPlacement, artwork } = await placeDetected(pdf, detected);
+
+  let cleaned = pdf;
+
+  try {
+    cleaned = await erasePlaceholders(pdf, artwork);
+  } catch (error) {
+    logger.warn("Could not erase placeholder artwork; keeping the converted PDF as it is", {
+      placeholders: artwork.length,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return { pdf: cleaned, pageCount, fields, needsPlacement };
 }
 
 export async function createDraft(input: {
@@ -284,9 +347,11 @@ export async function createDraft(input: {
   fileName: string;
   mimeType: string;
 }): Promise<DraftView> {
-  const detected = detectSignatureFields(input.file);
-  const pdf = await convertDocxToPdf(input.file, input.fileName);
-  const { pageCount, fields, needsPlacement } = await placeDetected(pdf, detected);
+  const converted = await convertDocxToPdf(input.file, input.fileName);
+  const { pdf, pageCount, fields, needsPlacement } = await prepareConvertedPdf(
+    input.file,
+    converted
+  );
 
   const fileId = await saveDocumentFile(input.file, input.fileName, input.mimeType);
   const pdfFileId = await saveDocumentFile(pdf, pdfFileName(input.fileName), "application/pdf");

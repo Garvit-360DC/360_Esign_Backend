@@ -1,3 +1,4 @@
+import type { PDFFont } from "pdf-lib";
 import { logger } from "../../config/logger";
 import { AppError } from "../../utils/appError";
 import { signerLabel } from "./sign-request.types";
@@ -23,9 +24,32 @@ const SIZE_TOLERANCE_PT = 2;
 const DEFAULT_WIDTH_PT = 150;
 const DEFAULT_HEIGHT_PT = 60;
 
+/** Used when pdf.js reports no height for a text item. */
+const FALLBACK_FONT_SIZE_PT = 12;
+
+/** Descenders reach roughly a quarter of the font size below the baseline. */
+const DESCENDER_RATIO = 0.25;
+
+/**
+ * Horizontal slack around an erased token, as a fraction of its font size.
+ *
+ * The token's edges are estimated (see `loadMeasure`), and the estimate's error grows with the
+ * font, so the slack does too. It stays under half the width of a space: reaching into the gap
+ * beside a token is harmless, reaching into the next word erases document content. When the two
+ * pull against each other this errs towards leaving a hair of the brace visible.
+ */
+const ERASE_PADDING_EM = 0.12;
+
 export type LocatedPlaceholder = {
   page: number;
+  /** Where the field goes. For a text token this is larger than the token, to fit a signature. */
   rect: FieldRect;
+  /**
+   * What the placeholder itself occupies on the page, so its artwork can be painted out.
+   * The same as `rect` for a picture; the tight glyph box for a `{%role}` token — erasing the
+   * field box instead would take neighbouring words and the line above with it.
+   */
+  artwork: FieldRect;
 };
 
 export type LocateResult = {
@@ -33,15 +57,16 @@ export type LocateResult = {
   located: LocatedPlaceholder[];
 };
 
+/** A box on a page, in PDF points with a top-left origin. */
+type Box = { x: number; top: number; width: number; height: number };
+
 /** A candidate found in the PDF, in PDF points with a top-left origin. */
-type Candidate = {
+type Candidate = Box & {
   page: number;
-  x: number;
-  top: number;
-  width: number;
-  height: number;
   pageWidth: number;
   pageHeight: number;
+  /** The placeholder's own extent, when it differs from the field box. Pictures leave it unset. */
+  artwork?: Box;
 };
 
 function multiply(a: Matrix, b: Matrix): Matrix {
@@ -55,12 +80,23 @@ function multiply(a: Matrix, b: Matrix): Matrix {
   ];
 }
 
-function normalize(candidate: Candidate): FieldRect {
+function normalize(box: Box, pageWidth: number, pageHeight: number): FieldRect {
   return {
-    x: candidate.x / candidate.pageWidth,
-    y: candidate.top / candidate.pageHeight,
-    width: candidate.width / candidate.pageWidth,
-    height: candidate.height / candidate.pageHeight,
+    x: box.x / pageWidth,
+    y: box.top / pageHeight,
+    width: box.width / pageWidth,
+    height: box.height / pageHeight,
+  };
+}
+
+function toLocated(candidate: Candidate): LocatedPlaceholder {
+  const { pageWidth, pageHeight } = candidate;
+  const rect = normalize(candidate, pageWidth, pageHeight);
+
+  return {
+    page: candidate.page,
+    rect,
+    artwork: candidate.artwork ? normalize(candidate.artwork, pageWidth, pageHeight) : rect,
   };
 }
 
@@ -86,10 +122,59 @@ function expectedSize(placeholder: DetectedPlaceholder): { widthPt: number; heig
 }
 
 /**
+ * pdf.js expects a browser. Its bundle includes the canvas renderer, which builds a
+ * `new DOMMatrix()` at module scope — so in Node the import itself throws
+ * `ReferenceError: DOMMatrix is not defined` before any of our code runs.
+ *
+ * Nothing here rasterises: we read the operator list and the text layer, never
+ * `page.render()`. So rather than pull in a native canvas binding for a path that draws
+ * nothing, define the shapes the module needs to finish loading. They throw if anything
+ * actually tries to use them, so a future code path that does need real rendering fails
+ * loudly instead of drawing nonsense.
+ */
+function installDomShims(): void {
+  const unsupported = (name: string) => {
+    throw new Error(
+      `${name} is not available in Node. This code path must not rasterise a PDF.`
+    );
+  };
+
+  const globals = globalThis as Record<string, unknown>;
+
+  globals.DOMMatrix ??= class {
+    a = 1;
+    b = 0;
+    c = 0;
+    d = 1;
+    e = 0;
+    f = 0;
+    multiplySelf() {
+      return unsupported("DOMMatrix.multiplySelf");
+    }
+    scaleSelf() {
+      return unsupported("DOMMatrix.scaleSelf");
+    }
+  };
+
+  globals.Path2D ??= class {
+    constructor() {
+      unsupported("Path2D");
+    }
+  };
+
+  globals.ImageData ??= class {
+    constructor() {
+      unsupported("ImageData");
+    }
+  };
+}
+
+/**
  * pdfjs-dist ships as ESM only. The backend emits CommonJS, so it has to come in through a
  * dynamic import, which TypeScript preserves under module: Node16.
  */
 async function loadPdfjs() {
+  installDomShims();
   return import("pdfjs-dist/legacy/build/pdf.mjs");
 }
 
@@ -140,6 +225,33 @@ function collectImages(
   return found;
 }
 
+/** Width of a string in em units, for estimating where characters fall inside a text item. */
+type Measure = (text: string) => number;
+
+let metricsFont: PDFFont | null = null;
+
+/**
+ * Relative glyph widths, borrowed from Helvetica.
+ *
+ * pdf.js gives a text item's total width but not where each character sits in it, and a
+ * `{%role}` token usually shares an item with the words around it. Splitting the width evenly
+ * per character drifts by a few points because `i`, `:` and spaces are narrow — enough to leave
+ * the edge of a brace visible after erasing. The document's own font is not available here, but
+ * Helvetica's proportions scaled to the item's real width land far closer for any Latin font.
+ */
+async function loadMeasure(): Promise<Measure> {
+  if (!metricsFont) {
+    const { PDFDocument, StandardFonts } = await import("pdf-lib");
+    metricsFont = await (await PDFDocument.create()).embedFont(StandardFonts.Helvetica);
+  }
+
+  const font = metricsFont;
+
+  // Helvetica encodes WinAnsi only; anything outside it is measured as an average-width letter
+  // rather than throwing.
+  return (text) => font.widthOfTextAtSize(text.replace(/[^\x20-\x7e\xa0-\xff]/g, "n"), 1);
+}
+
 /** The subset of a pdfjs text item this module needs. */
 type PositionedText = {
   str: string;
@@ -159,6 +271,7 @@ function isPositionedText(item: unknown): item is PositionedText {
  */
 function collectTextTokens(
   items: PositionedText[],
+  measure: Measure,
   tags: string[],
   page: number,
   pageWidth: number,
@@ -189,13 +302,34 @@ function collectTextTokens(
       if (at === -1) break;
       from = at + tag.length;
 
-      const start = items[itemAt(at)];
-      const end = items[itemAt(from - 1)];
-      if (!start) continue;
+      const startIndex = itemAt(at);
+      const endIndex = itemAt(from - 1);
+      const start = items[startIndex];
+      const end = items[endIndex];
+      if (!start || !end) continue;
 
-      const left = start.transform[4];
+      // pdf.js positions whole text items, not glyphs, and a token typed mid-sentence usually
+      // shares an item with the words around it. Taking the item's own start would put the box —
+      // and the eraser — at the beginning of the line. Place the token inside its item by the
+      // share of the item's measured width that the preceding characters take up.
+      const xAt = (item: PositionedText, offset: number) => {
+        const total = measure(item.str);
+        const share =
+          total > 0
+            ? measure(item.str.slice(0, offset)) / total
+            : item.str.length
+              ? offset / item.str.length
+              : 0;
+        return item.transform[4] + item.width * share;
+      };
+
+      const left = xAt(start, at - starts[startIndex]);
+      const right = xAt(end, from - starts[endIndex]);
       const baseline = start.transform[5];
-      const textWidth = Math.max(end.transform[4] + end.width - left, start.width);
+      const textWidth = Math.max(right - left, 1);
+      // pdf.js reports a text item's height as its font size. A token Word split across items
+      // may carry two sizes; the larger one covers both.
+      const fontSize = Math.max(start.height, end.height) || FALLBACK_FONT_SIZE_PT;
 
       // Glyphs sit above the baseline, so a box resting on the baseline covers the token
       // once a signature is stamped over it.
@@ -207,6 +341,14 @@ function collectTextTokens(
         height: DEFAULT_HEIGHT_PT,
         pageWidth,
         pageHeight,
+        // Only the token itself, from ascender to descender. The field box above is sized for a
+        // signature and would wipe out the rest of the line if it were used to erase.
+        artwork: {
+          x: left - fontSize * ERASE_PADDING_EM,
+          top: pageHeight - (baseline + fontSize),
+          width: textWidth + fontSize * ERASE_PADDING_EM * 2,
+          height: fontSize * (1 + DESCENDER_RATIO),
+        },
       });
     }
 
@@ -216,25 +358,27 @@ function collectTextTokens(
   return byTag;
 }
 
-/** Page count only — used when a document has no placeholders to locate. */
+/**
+ * Page count only — used when a document has no placeholders to locate, which is the common
+ * case for a document prepared by hand.
+ *
+ * Uses pdf-lib rather than pdf.js. Counting pages needs the page tree and nothing else, so
+ * loading a renderer to read one number means the most-travelled upload path carries pdf.js's
+ * browser assumptions for no benefit. Falls back to 1 rather than failing an upload: a wrong
+ * page count costs a scrollbar, and the real count arrives when the viewer renders.
+ */
 export async function countPages(pdf: Buffer): Promise<number> {
-  const pdfjs = await loadPdfjs();
-  const loadingTask = pdfjs.getDocument({
-    data: new Uint8Array(pdf),
-    disableFontFace: true,
-    useWorkerFetch: false,
-  });
-
   try {
-    const document = await loadingTask.promise;
-    return document.numPages;
+    const { PDFDocument } = await import("pdf-lib");
+    const document = await PDFDocument.load(new Uint8Array(pdf), {
+      updateMetadata: false,
+    });
+    return document.getPageCount();
   } catch (error) {
     logger.warn("Could not read the page count from the converted PDF", {
       message: error instanceof Error ? error.message : String(error),
     });
     return 1;
-  } finally {
-    await loadingTask.destroy();
   }
 }
 
@@ -260,6 +404,7 @@ export async function locatePlaceholders(
 
   const images: Candidate[] = [];
   const textHits = new Map<string, Candidate[]>();
+  const measure = wantedTags.length ? await loadMeasure() : null;
   let pageCount = 0;
 
   try {
@@ -275,13 +420,20 @@ export async function locatePlaceholders(
         images.push(...collectImages(ops, OPS, pageNumber, width, height));
       }
 
-      if (wantedTags.length) {
+      if (measure) {
         const content = await page.getTextContent();
         const items: PositionedText[] = [];
         for (const item of content.items) {
           if (isPositionedText(item)) items.push(item);
         }
-        for (const [tag, hits] of collectTextTokens(items, wantedTags, pageNumber, width, height)) {
+        for (const [tag, hits] of collectTextTokens(
+          items,
+          measure,
+          wantedTags,
+          pageNumber,
+          width,
+          height
+        )) {
           textHits.set(tag, [...(textHits.get(tag) ?? []), ...hits]);
         }
       }
@@ -325,8 +477,7 @@ export async function locatePlaceholders(
     }
 
     imagePlaceholders.forEach((placeholder, index) => {
-      const candidate = candidates[index];
-      located.set(placeholder, { page: candidate.page, rect: normalize(candidate) });
+      located.set(placeholder, toLocated(candidates[index]));
     });
   }
 
@@ -343,7 +494,7 @@ export async function locatePlaceholders(
       );
     }
 
-    located.set(placeholder, { page: candidate.page, rect: normalize(candidate) });
+    located.set(placeholder, toLocated(candidate));
   }
 
   return {

@@ -10,7 +10,8 @@
     "start": "node dist/server.js",
     "preview:emails": "tsx scripts/preview-emails.ts",
     "mail:test": "tsx scripts/send-test-email.ts",
-    "backfill:org": "tsx scripts/backfill-org-id.ts"
+    "backfill:org": "tsx scripts/backfill-org-id.ts",
+    "sf:describe": "tsx scripts/describe-sf-objects.ts"
   },
   "dependencies": {
     "@types/jsonwebtoken": "^9.0.10",

@@ -257,6 +257,8 @@ export type CreateSignRequestInput = {
 export type SignRequestDraft = {
   id: string;
   orgId: string;
+  /** Set when the draft came from a template, so a sent envelope records its provenance. */
+  templateKey?: string | null;
   token: string;
   fileName: string;
   fileId: string;
@@ -278,6 +280,14 @@ export type PlacedField = {
 };
 
 /** What the prepare screen receives. Carries no file bytes. */
+/** A signer slot a template defines, used to pre-fill the send screen. */
+export type DraftRecipient = {
+  role: SignerRole;
+  label: string | null;
+  defaultName: string | null;
+  defaultEmail: string | null;
+};
+
 export type DraftView = {
   id: string;
   token: string;
@@ -287,6 +297,10 @@ export type DraftView = {
   fields: PlacedField[];
   /** True when the boxes came from the add-in but could not be located in the PDF. */
   needsPlacement: boolean;
+  /** Present only for a draft started from a template. */
+  templateKey?: string;
+  templateName?: string;
+  recipients?: DraftRecipient[];
 };
 
 export type CeremonyField = {

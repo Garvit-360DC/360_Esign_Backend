@@ -24,6 +24,12 @@ const envSchema = z.object({
   /** Default redirect_uri for the add-in's own exchange, when it does not send one. */
   SF_REDIRECT_URI: z.string().url(),
 
+  /**
+   * Namespace of the package the eSign objects ship in, e.g. `x360eSign__`. Empty when the
+   * objects were created directly in the org, which is how they exist in development.
+   */
+  SF_NAMESPACE_PREFIX: z.string().default(""),
+
   /** Signs the app JWT. `Token_Key_Value` in the connector. */
   JWT_SECRET: z.string().min(16, "JWT_SECRET must be at least 16 characters"),
 

@@ -6,6 +6,7 @@ import { rateLimitMiddleware } from "./middleware/rate-limit.middleware";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { healthRoutes } from "./modules/health/health.routes";
 import { signRequestRoutes } from "./modules/sign-requests/sign-request.routes";
+import { templateRoutes } from "./modules/templates/template.routes";
 
 export function createApp() {
   const app = express();
@@ -26,6 +27,7 @@ export function createApp() {
   // connector so the Word add-in needs no change.
   app.use(authRoutes);
   app.use("/sign-requests", signRequestRoutes);
+  app.use("/templates", templateRoutes);
 
   app.use(unknownRoute);
   app.use(errorMiddleware);

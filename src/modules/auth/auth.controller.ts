@@ -106,20 +106,21 @@ export const refreshToken = asyncHandler(async (req: Request, res: Response) => 
 });
 
 /**
- * POST /getToken — called by Salesforce to start the admin sign-in.
+ * POST /getToken — starts a sign-in.
  *
- * Returns the authorize URL for the admin to open and a JWT for the caller. PKCE, with the
- * verifier carried in `state` so the callback can complete the exchange without a
- * server-side record.
+ * Returns the authorize URL to open. PKCE, with the verifier carried in `state` so the
+ * callback can complete the exchange without a server-side record.
+ *
+ * `orgId` is optional. Salesforce knows its own org and sends it, and gets a JWT back for
+ * that org straight away. The console has no org id before anyone has signed in, so it omits
+ * the field and receives only the URL — `handleCallback` creates the row from the identity
+ * Salesforce returns, and hands the JWT back through the popup.
  */
 export const getToken = asyncHandler(async (req: Request, res: Response) => {
   const { environmentType, orgId, instanceUrl, username } = req.body ?? {};
 
   if (!environmentType) {
     throw new AppError("Missing required field: environmentType", 400);
-  }
-  if (!orgId) {
-    throw new AppError("Missing required field: orgId", 400);
   }
 
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
@@ -143,6 +144,12 @@ export const getToken = asyncHandler(async (req: Request, res: Response) => {
     state,
   });
 
+  const authUrl = `${getLoginUrl(environmentType)}/services/oauth2/authorize?${params}`;
+
+  if (!orgId) {
+    return res.json({ authUrl });
+  }
+
   await createOrgSession({
     org_id: orgId,
     loginTypeSF: environmentType,
@@ -150,11 +157,9 @@ export const getToken = asyncHandler(async (req: Request, res: Response) => {
     username,
   });
 
-  const jwt = generateToken({ orgId, environmentType, instanceUrl: instanceUrl ?? null });
-
   return res.json({
-    jwt,
-    authUrl: `${getLoginUrl(environmentType)}/services/oauth2/authorize?${params}`,
+    jwt: generateToken({ orgId, environmentType, instanceUrl: instanceUrl ?? null }),
+    authUrl,
   });
 });
 
@@ -210,6 +215,33 @@ export const handleCallback = asyncHandler(async (req: Request, res: Response) =
     tokenExpiry: new Date(Date.now() + 2 * 60 * 60 * 1000),
   });
 
+  // The console never sees this response — the callback runs in the popup it opened — so the
+  // JWT rides back on the postMessage. Targeted at FRONTEND_URL rather than "*", since a
+  // wildcard would hand the token to whatever else happened to be listening. Both values go
+  // through JSON.stringify so neither can break out of the script.
+  const jwt = generateToken({
+    orgId,
+    environmentType: environmentType || "production",
+    instanceUrl: data.instance_url ?? null,
+  });
+
+  // Two `helmet()` defaults have to be relaxed for this one response, and only this one.
+  //
+  // `script-src 'self'` blocks the inline script below, so the page would render but never
+  // post the token or close itself. A per-request nonce authorises exactly this script
+  // instead of loosening the policy everywhere.
+  //
+  // `Cross-Origin-Opener-Policy: same-origin` is the subtler one: it puts this page in its
+  // own browsing context group, which severs `window.opener`. The script then silently posts
+  // nothing and the popup just closes. A sign-in popup exists to talk to its opener, so this
+  // page opts out.
+  const nonce = crypto.randomBytes(16).toString("base64");
+  res.setHeader(
+    "Content-Security-Policy",
+    `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'`
+  );
+  res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+
   return res.send(`
     <html>
     <head>
@@ -236,18 +268,32 @@ export const handleCallback = asyncHandler(async (req: Request, res: Response) =
     <body>
       <div class="container">
       <h2>&#9989; Authorization Successful</h2>
+      <p id="note"></p>
       </div>
 
-      <script>
-      window.opener && window.opener.postMessage(
-        { status: 'success' },
-        '*'
-      );
+      <script nonce="${nonce}">
+      // Say so rather than closing silently if the opener is gone: a popup that vanishes and
+      // a console that never signs in look identical from the outside, and this is the one
+      // fact that tells them apart.
+      if (window.opener) {
+        window.opener.postMessage(
+          {
+            status: 'success',
+            jwt: ${JSON.stringify(jwt)},
+            orgId: ${JSON.stringify(orgId)},
+            username: ${JSON.stringify(username ?? null)}
+          },
+          ${JSON.stringify(env.FRONTEND_URL)}
+        );
 
-      // Give user 1.5 seconds to see message before closing
-      setTimeout(() => {
-        window.close();
-      }, 1500);
+        // Give user 1.5 seconds to see message before closing
+        setTimeout(() => {
+          window.close();
+        }, 1500);
+      } else {
+        document.getElementById('note').textContent =
+          'Signed in, but this window lost its link to the console. Close it and try again.';
+      }
       </script>
     </body>
     </html>

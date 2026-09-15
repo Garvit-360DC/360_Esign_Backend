@@ -41,6 +41,7 @@ const placedFieldSchema = new Schema<PlacedField>(
 const draftSchema = new Schema(
   {
     orgId: { type: String, required: true, index: true },
+    templateKey: { type: String, default: null },
     token: { type: String, required: true },
     fileName: { type: String, required: true },
     fileId: { type: Schema.Types.ObjectId, required: true },
@@ -58,6 +59,7 @@ const DraftModel = mongoose.model("SignRequestDraft", draftSchema);
 type DraftDoc = {
   _id: mongoose.Types.ObjectId;
   orgId: string;
+  templateKey: string | null;
   token: string;
   fileName: string;
   fileId: mongoose.Types.ObjectId;
@@ -72,6 +74,7 @@ function toDraft(doc: DraftDoc): SignRequestDraft {
   return {
     id: String(doc._id),
     orgId: doc.orgId,
+    templateKey: doc.templateKey ?? null,
     token: doc.token,
     fileName: doc.fileName,
     fileId: String(doc.fileId),
@@ -85,6 +88,7 @@ function toDraft(doc: DraftDoc): SignRequestDraft {
 
 export async function createDraftRecord(data: {
   orgId: string;
+  templateKey?: string | null;
   token: string;
   fileName: string;
   fileId: string;
@@ -95,6 +99,7 @@ export async function createDraftRecord(data: {
 }): Promise<SignRequestDraft> {
   const created = await DraftModel.create({
     orgId: data.orgId,
+    templateKey: data.templateKey ?? null,
     token: data.token,
     fileName: data.fileName,
     fileId: new mongoose.Types.ObjectId(data.fileId),
