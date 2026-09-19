@@ -30,6 +30,7 @@ import {
   saveDocumentFile,
   setFieldValues,
   updateSignRequest,
+  type ListFilter,
 } from "./sign-request.repository";
 import { isDrawnField, signerLabel } from "./sign-request.types";
 import type {
@@ -469,9 +470,10 @@ export async function sendDraft(
 export async function list(
   orgId: string,
   limit: number,
-  skip: number
+  skip: number,
+  filter: ListFilter = {}
 ): Promise<{ items: SignRequestSummary[]; total: number }> {
-  return listSignRequests(orgId, limit, skip);
+  return listSignRequests(orgId, limit, skip, filter);
 }
 
 export async function stats(orgId: string): Promise<SignRequestStats> {

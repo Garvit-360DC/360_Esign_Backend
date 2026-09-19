@@ -102,12 +102,15 @@ export function isDrawnField(type: SignFieldType): boolean {
 }
 
 export type SignerStatus = "pending" | "viewed" | "signed" | "declined";
-export type SignRequestStatus =
-  | "pending"
-  | "in_progress"
-  | "completed"
-  | "cancelled"
-  | "declined";
+/** Listed as a value too, so the list query can validate a ?status= against it. */
+export const SIGN_REQUEST_STATUSES = [
+  "pending",
+  "in_progress",
+  "completed",
+  "cancelled",
+  "declined",
+] as const;
+export type SignRequestStatus = (typeof SIGN_REQUEST_STATUSES)[number];
 /** Where a field came from: an add-in picture, a literal text tag, or placed by hand. */
 export type SignatureFieldSource = "image" | "text" | "manual";
 

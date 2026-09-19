@@ -109,8 +109,8 @@ export const sendSignRequestDraft = asyncHandler(async (req: Request, res: Respo
 });
 
 export const listSignRequests = asyncHandler(async (req: Request, res: Response) => {
-  const { limit, skip } = parseListQuery(req.query);
-  const { items, total } = await list(orgIdOf(req), limit, skip);
+  const { limit, skip, status, q } = parseListQuery(req.query);
+  const { items, total } = await list(orgIdOf(req), limit, skip, { status, q });
   return sendSuccess(res, { items, total, limit, skip });
 });
 

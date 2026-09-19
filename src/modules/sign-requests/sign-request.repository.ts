@@ -281,23 +281,53 @@ export async function findById(id: string, orgId?: string): Promise<SignRequest 
   return toSignRequest(doc as SignRequestDoc);
 }
 
+/** Whatever the sender typed is a literal, never a pattern of their own. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export type ListFilter = {
+  status?: SignRequest["status"];
+  /** Free text, matched against the file name and the signers' names and addresses. */
+  q?: string;
+};
+
 /**
  * Newest first. `signatureFields` is projected out because its values are base64 signature
  * images, which would dominate the payload and are not needed for a list row.
+ *
+ * `total` counts the filtered set, not the org's whole history, so the pager stays honest
+ * while a filter is on.
  */
 export async function listSignRequests(
   orgId: string,
   limit: number,
-  skip: number
+  skip: number,
+  filter: ListFilter = {}
 ): Promise<{ items: SignRequestSummary[]; total: number }> {
+  const term = filter.q ? new RegExp(escapeRegExp(filter.q), "i") : null;
+  const query = {
+    orgId,
+    ...(filter.status ? { status: filter.status } : {}),
+    ...(term
+      ? {
+          $or: [
+            { fileName: term },
+            { "signers.name": term },
+            { "signers.email": term },
+          ],
+        }
+      : {}),
+  };
+
   const [docs, total] = await Promise.all([
-    SignRequestModel.find({ orgId })
+    SignRequestModel.find(query)
       .select("-signatureFields")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean(),
-    SignRequestModel.countDocuments({ orgId }),
+    SignRequestModel.countDocuments(query),
   ]);
 
   const items = (docs as unknown as Omit<SignRequestDoc, "signatureFields">[]).map((doc) => ({

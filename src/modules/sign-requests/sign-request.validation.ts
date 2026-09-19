@@ -1,6 +1,19 @@
 import { z } from "zod";
 import { AppError } from "../../utils/appError";
-import { SIGNER_ROLE_RE, type SignerInput, type SignerRole } from "./sign-request.types";
+import {
+  SIGNER_ROLE_RE,
+  SIGN_REQUEST_STATUSES,
+  type SignerInput,
+  type SignerRole,
+  type SignRequestStatus,
+} from "./sign-request.types";
+
+export type ListQuery = {
+  limit: number;
+  skip: number;
+  status?: SignRequestStatus;
+  q?: string;
+};
 
 export const signerInputSchema = z.object({
   role: z
@@ -98,12 +111,19 @@ export function parseRemindBody(raw: unknown): { recipientId?: string } {
   return result.data;
 }
 
+/** A cleared filter arrives as an empty string, which means "no filter", not "match empty". */
+const blankToUndefined = (value: unknown) =>
+  typeof value === "string" && value.trim() === "" ? undefined : value;
+
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   skip: z.coerce.number().int().min(0).default(0),
+  status: z.preprocess(blankToUndefined, z.enum(SIGN_REQUEST_STATUSES).optional()),
+  /** Matched against the file name. Capped so a pasted document cannot become a regex. */
+  q: z.preprocess(blankToUndefined, z.string().trim().max(200).optional()),
 });
 
-export function parseListQuery(raw: unknown): { limit: number; skip: number } {
+export function parseListQuery(raw: unknown): ListQuery {
   const result = listQuerySchema.safeParse(raw);
   if (!result.success) {
     const message = result.error.issues.map((issue) => issue.message).join("; ");
