@@ -16,9 +16,7 @@ export function toSignatureFields(
     return {
       id: `${field.role}_${field.index}`,
       role: field.role,
-      // The Word add-in only ever inserts signature boxes; the other field types are
-      // added on the prepare screen.
-      type: "signature" as const,
+      type: field.type,
       tag: field.tag,
       source: field.source,
       widthPt: field.widthPt,

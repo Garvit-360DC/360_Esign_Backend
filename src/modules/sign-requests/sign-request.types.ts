@@ -147,6 +147,8 @@ export type PublicSigner = Omit<Signer, "token"> & {
 
 export type DetectedPlaceholder = {
   role: SignerRole;
+  /** Read from the tag: `{%signer1}` is a signature, `{%signer1:initial}` an initial. */
+  type: SignFieldType;
   tag: string;
   source: SignatureFieldSource;
   widthPt?: number;
@@ -156,8 +158,6 @@ export type DetectedPlaceholder = {
 
 export type SignatureField = DetectedPlaceholder & {
   id: string;
-  /** What this box collects. Boxes the Word add-in inserts are always signatures. */
-  type: SignFieldType;
   page: number;
   rect: FieldRect;
   value?: string | null;

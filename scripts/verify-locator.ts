@@ -36,7 +36,8 @@ async function main() {
 
   const detected: DetectedPlaceholder[] = TRUTH.map((_, index) => ({
     role: `signer${index + 1}` as const,
-    tag: `{%signer${index + 1}}`,
+    type: "signature",
+    tag:`{%signer${index + 1}}`,
     source: "image",
     widthPt: W,
     heightPt: H,

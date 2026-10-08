@@ -2,18 +2,30 @@ import PizZip from "pizzip";
 import { AppError } from "../../utils/appError";
 import {
   SIGNER_ROLE_PATTERN,
+  SIGN_FIELD_TYPES,
   isSignerRole,
   type DetectedPlaceholder,
+  type SignFieldType,
   type SignerRole,
 } from "./sign-request.types";
 
+// A tag names a signer and, optionally, what the box collects: `{%signer1}` is a signature,
+// `{%signer1:initial}` an initial, `{%signer1:fullName}` a name, and so on. The bare form
+// predates the suffix, so it stays a signature.
+const FIELD_TYPE_PATTERN = SIGN_FIELD_TYPES.join("|");
+const TAG_PATTERN = `\\{%(${SIGNER_ROLE_PATTERN})(?::(${FIELD_TYPE_PATTERN}))?\\}`;
+
 // The add-in writes the tag into the picture's alt text (`descr`). It never sets `name`,
 // which Word fills in with "Picture 1" and friends, but reading both is harmless.
-const TAG_ATTR_RE = new RegExp(
-  `(?:descr|name)\\s*=\\s*["']\\{%(${SIGNER_ROLE_PATTERN})\\}["']`,
-  "i"
-);
-const TEXT_TAG_RE = new RegExp(`\\{%(${SIGNER_ROLE_PATTERN})\\}`, "g");
+const TAG_ATTR_RE = new RegExp(`(?:descr|name)\\s*=\\s*["'](${TAG_PATTERN})["']`, "i");
+const TEXT_TAG_RE = new RegExp(TAG_PATTERN, "gi");
+
+/** The attribute regex is case-insensitive, so map the suffix back to its canonical key. */
+function toFieldType(raw: string | undefined): SignFieldType {
+  if (!raw) return "signature";
+  const lower = raw.toLowerCase();
+  return SIGN_FIELD_TYPES.find((type) => type.toLowerCase() === lower) ?? "signature";
+}
 const EXTENT_RE = /<wp:extent\b[^>]*>/i;
 const CX_RE = /\bcx="(\d+)"/;
 const CY_RE = /\bcy="(\d+)"/;
@@ -45,14 +57,15 @@ function extractImageFields(xml: string): DetectedPlaceholder[] {
 
   for (const match of drawings) {
     const block = match[0];
-    const roleMatch = block.match(TAG_ATTR_RE);
-    const role = roleMatch?.[1];
-    if (!role || !isSignerRole(role)) continue;
+    const tagMatch = block.match(TAG_ATTR_RE);
+    const role = tagMatch?.[2];
+    if (!tagMatch || !role || !isSignerRole(role)) continue;
 
     const size = readExtent(block);
     fields.push({
       role,
-      tag: `{%${role}}`,
+      type: toFieldType(tagMatch[3]),
+      tag: tagMatch[1],
       source: "image",
       ...size,
       index: 0,
@@ -72,10 +85,12 @@ function extractTextFields(
   for (const match of xml.matchAll(TEXT_TAG_RE)) {
     const role = match[1];
     if (!role || !isSignerRole(role)) continue;
-    const tag = `{%${role}}`;
+    // The literal text, not a rebuilt tag: the locator searches the PDF's text for it.
+    const tag = match[0];
     if (imageTags.has(tag)) continue;
     fields.push({
       role,
+      type: toFieldType(match[2]),
       tag,
       source: "text",
       index: 0,

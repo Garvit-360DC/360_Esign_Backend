@@ -32,7 +32,7 @@ import {
   updateSignRequest,
   type ListFilter,
 } from "./sign-request.repository";
-import { isDrawnField, signerLabel } from "./sign-request.types";
+import { FIELD_TYPE_META, isDrawnField, signerLabel } from "./sign-request.types";
 import type {
   CeremonySession,
   CreateSignRequestInput,
@@ -158,7 +158,7 @@ export async function create(input: CreateSignRequestInput): Promise<PublicSignR
   const detected = extractSignatureFields(input.file);
   assertSignersMatchFields(
     input.signers.map((signer) => signer.role),
-    detected.map((field) => ({ role: field.role, type: "signature" as const }))
+    detected.map((field) => ({ role: field.role, type: field.type }))
   );
 
   const pdf = await convertDocxToPdf(input.file, input.fileName);
@@ -224,13 +224,13 @@ async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> 
 function defaultPlacement(detected: DetectedPlaceholder[]): PlacedField[] {
   return detected.map((field, index) => ({
     role: field.role,
-    type: "signature" as const,
+    type: field.type,
     page: 1,
     rect: {
       x: 0.12,
       y: Math.min(0.82, 0.15 + index * 0.14),
-      width: 0.25,
-      height: 0.08,
+      width: FIELD_TYPE_META[field.type].width,
+      height: FIELD_TYPE_META[field.type].height,
     },
     source: field.source,
   }));
@@ -296,7 +296,7 @@ async function placeDetected(
     pageCount: result.pageCount,
     fields: detected.map((field, index) => ({
       role: field.role,
-      type: "signature" as const,
+      type: field.type,
       page: result.located[index].page,
       rect: result.located[index].rect,
       source: field.source,
