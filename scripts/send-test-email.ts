@@ -1,5 +1,5 @@
 /**
- * Sends one real message through the configured SMTP server, to prove the credentials work
+ * Sends one real message through SendGrid, to prove the API key and sender work
  * without creating an envelope.
  *
  *   npm run mail:test -- you@example.com
@@ -31,7 +31,7 @@ async function main() {
 
   if (!isMailEnabled()) {
     console.error(
-      "Mail is not configured. Set SMTP_HOST and MAIL_FROM in .env — both are required."
+      "Mail is not configured. Set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL in .env — both are required."
     );
     process.exit(1);
   }
@@ -40,7 +40,7 @@ async function main() {
     "../src/modules/sign-requests/sign-request.email-layout"
   );
 
-  console.log(`Sending via ${env.SMTP_HOST}:${env.SMTP_PORT} as ${env.MAIL_FROM}`);
+  console.log(`Sending via SendGrid as ${env.SENDGRID_FROM_EMAIL}`);
 
   const sent = await sendMail({
     to,
@@ -54,8 +54,8 @@ async function main() {
           "This message was sent by <strong>npm run mail:test</strong>. If you are reading it, signing invitations, completion notices and decline notices will reach signers too."
         ) +
         metaTable([
-          { label: "Server", value: `${env.SMTP_HOST}:${env.SMTP_PORT}` },
-          { label: "From", value: env.MAIL_FROM ?? "" },
+          { label: "Provider", value: "SendGrid" },
+          { label: "From", value: env.SENDGRID_FROM_EMAIL ?? "" },
           { label: "To", value: to },
         ]) +
         muted("Nothing was signed and no envelope was created."),
@@ -65,15 +65,15 @@ async function main() {
       "Email is working",
       "",
       "This message was sent by `npm run mail:test`.",
-      `Server: ${env.SMTP_HOST}:${env.SMTP_PORT}`,
-      `To:     ${to}`,
+      "Provider: SendGrid",
+      `To:       ${to}`,
     ].join("\n"),
   });
 
   if (!sent) {
-    // sendMail never throws — it logs the SMTP error and reports false — so the reason is
+    // sendMail never throws — it logs SendGrid's error and reports false — so the reason is
     // already on the console above this line.
-    console.error("\nSend failed. The SMTP error is logged above.");
+    console.error("\nSend failed. SendGrid's error is logged above.");
     process.exit(1);
   }
 

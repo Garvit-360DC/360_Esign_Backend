@@ -40,13 +40,17 @@ const envSchema = z.object({
   /** Product assumed when a request names none. The connector's `DEFAULT_APP_NAME`. */
   DEFAULT_APP_NAME: z.string().optional(),
 
-  // Mail is optional. Without SMTP_HOST and MAIL_FROM the app runs exactly as before and
-  // signing links are only handed back in the API response.
-  SMTP_HOST: z.string().min(1).optional(),
-  SMTP_PORT: z.coerce.number().int().positive().default(587),
-  SMTP_USER: z.string().optional(),
-  SMTP_PASS: z.string().optional(),
-  MAIL_FROM: z.string().min(1).optional(),
+  /**
+   * Each org's callback secret is derived from this. Changing it changes every org's secret.
+   * Without it, status events go out unsigned, which Salesforce only accepts from an org with
+   * no `Callback_Secret__c`.
+   */
+  CALLBACK_SIGNING_KEY: z.string().min(32).optional(),
+
+  // Mail is optional. Without both SendGrid values the console's signing links are only handed
+  // back in the API response, and sends from Salesforce are refused.
+  SENDGRID_API_KEY: z.string().min(1).optional(),
+  SENDGRID_FROM_EMAIL: z.string().min(1).optional(),
   MAIL_REPLY_TO: z.string().optional(),
 });
 

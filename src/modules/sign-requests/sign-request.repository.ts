@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import mongoose, { Schema } from "mongoose";
 import { AppError } from "../../utils/appError";
+import type { QueuedEvent } from "./sign-request.events";
 import {
   SIGNER_ROLE_RE,
   SIGN_FIELD_TYPES,
@@ -80,6 +81,12 @@ const signRequestSchema = new Schema(
     message: { type: String, default: null },
     voidReason: { type: String, default: null },
     salesforce: { type: Schema.Types.Mixed, default: null },
+    // Status events waiting to reach Salesforce, oldest first. See sign-request.events.ts.
+    pendingEvents: { type: [Schema.Types.Mixed], default: undefined },
+    deadEvents: { type: [Schema.Types.Mixed], default: undefined },
+    eventAttempts: { type: Number, default: 0 },
+    eventsNextAttemptAt: { type: Date, default: null },
+    eventsLockedUntil: { type: Date, default: null },
     fileName: { type: String, required: true },
     fileId: { type: Schema.Types.ObjectId, required: true },
     pdfFileId: { type: Schema.Types.ObjectId, required: true },
@@ -95,6 +102,8 @@ const signRequestSchema = new Schema(
 
 // The list screen is "this org's envelopes, newest first", which is exactly this index.
 signRequestSchema.index({ orgId: 1, createdAt: -1 });
+// What the event worker polls for. Almost every envelope has nothing due, so this stays cheap.
+signRequestSchema.index({ eventsNextAttemptAt: 1 });
 
 const SignRequestModel = mongoose.model("SignRequest", signRequestSchema);
 
@@ -506,6 +515,18 @@ export async function setFieldValues(
 
 const OPEN_STATUSES: SignRequestStatus[] = ["pending", "in_progress"];
 
+/** The update that applies `$set` and queues `events` in the same write. */
+function queueEvents(
+  $set: Record<string, unknown>,
+  events: QueuedEvent[] = []
+): { $set: Record<string, unknown>; $push?: Record<string, unknown> } {
+  if (events.length === 0) return { $set };
+  return {
+    $set: { ...$set, eventsNextAttemptAt: new Date() },
+    $push: { pendingEvents: { $each: events } },
+  };
+}
+
 type SignerPatch = Partial<
   Pick<Signer, "status" | "declineReason" | "viewedAt" | "signedAt" | "declinedAt">
 >;
@@ -522,7 +543,13 @@ export async function updateSigner(
   id: string,
   signerId: string,
   patch: SignerPatch,
-  options: { fromStatuses: Signer["status"][]; requestStatus?: SignRequestStatus }
+  options: {
+    fromStatuses: Signer["status"][];
+    requestStatus?: SignRequestStatus;
+    events?: QueuedEvent[];
+    /** Takes back an event not yet delivered, when the change it described is undone. */
+    removeEventId?: string;
+  }
 ): Promise<SignRequest | null> {
   const $set: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(patch)) {
@@ -536,7 +563,10 @@ export async function updateSigner(
       status: { $in: OPEN_STATUSES },
       signers: { $elemMatch: { _id: signerId, status: { $in: options.fromStatuses } } },
     },
-    { $set },
+    {
+      ...queueEvents($set, options.events),
+      ...(options.removeEventId ? { $pull: { pendingEvents: { id: options.removeEventId } } } : {}),
+    },
     { new: true }
   ).lean();
 
@@ -572,12 +602,13 @@ export async function transitionSignRequest(
     signedPdfFileId?: string;
     completedAt?: Date;
     voidReason?: string;
+    events?: QueuedEvent[];
   } = {}
 ): Promise<SignRequest | null> {
   const updated = await SignRequestModel.findOneAndUpdate(
     { _id: id, status: { $in: options.fromStatuses ?? OPEN_STATUSES } },
-    {
-      $set: {
+    queueEvents(
+      {
         status,
         ...(options.signedPdfFileId
           ? { signedPdfFileId: new mongoose.Types.ObjectId(options.signedPdfFileId) }
@@ -585,9 +616,122 @@ export async function transitionSignRequest(
         ...(options.completedAt ? { completedAt: options.completedAt } : {}),
         ...(options.voidReason ? { voidReason: options.voidReason } : {}),
       },
-    },
+      options.events
+    ),
     { new: true }
   ).lean();
 
   return updated ? toSignRequest(updated as SignRequestDoc) : null;
+}
+
+/** For events that follow a change already made, such as a failed delivery found while sending. */
+export async function appendEvents(id: string, events: QueuedEvent[]): Promise<void> {
+  if (events.length === 0) return;
+  await SignRequestModel.updateOne({ _id: id }, queueEvents({}, events));
+}
+
+// ---- event delivery --------------------------------------------------------
+// These pass `timestamps: false`: `updatedAt` means the envelope changed, and the console shows it
+// and the stuck-envelope sweep relies on it. A retry changes nothing about the envelope.
+
+const EVENT_CLAIM_MS = 60_000;
+
+export type ClaimedEnvelope = {
+  id: string;
+  orgId: string;
+  status: SignRequestStatus;
+  salesforce: SignRequest["salesforce"];
+  signers: { status: Signer["status"] }[];
+  pendingEvents: QueuedEvent[];
+  eventAttempts: number;
+};
+
+/** Claims one envelope with an event due, so that no other process works on it meanwhile. */
+export async function claimDueEnvelope(now: Date): Promise<ClaimedEnvelope | null> {
+  const doc = (await SignRequestModel.findOneAndUpdate(
+    {
+      eventsNextAttemptAt: { $ne: null, $lte: now },
+      $or: [{ eventsLockedUntil: null }, { eventsLockedUntil: { $lte: now } }],
+    },
+    { $set: { eventsLockedUntil: new Date(now.getTime() + EVENT_CLAIM_MS) } },
+    {
+      new: true,
+      timestamps: false,
+      projection: "orgId status salesforce signers.status pendingEvents eventAttempts",
+    }
+  ).lean()) as unknown as
+    | (Omit<ClaimedEnvelope, "id" | "pendingEvents" | "eventAttempts"> & {
+        _id: mongoose.Types.ObjectId;
+        pendingEvents?: QueuedEvent[];
+        eventAttempts?: number;
+      })
+    | null;
+
+  if (!doc) return null;
+
+  return {
+    id: String(doc._id),
+    orgId: doc.orgId,
+    status: doc.status,
+    salesforce: doc.salesforce ?? null,
+    signers: doc.signers,
+    pendingEvents: doc.pendingEvents ?? [],
+    eventAttempts: doc.eventAttempts ?? 0,
+  };
+}
+
+/** Puts off a claimed envelope's events without counting it as a failed attempt. */
+export async function holdEvents(id: string, until: Date): Promise<void> {
+  await SignRequestModel.updateOne(
+    { _id: id },
+    { $set: { eventsNextAttemptAt: until, eventsLockedUntil: null } },
+    { timestamps: false }
+  );
+}
+
+export async function retryEvent(id: string, at: Date): Promise<void> {
+  await SignRequestModel.updateOne(
+    { _id: id },
+    { $set: { eventsNextAttemptAt: at, eventsLockedUntil: null }, $inc: { eventAttempts: 1 } },
+    { timestamps: false }
+  );
+}
+
+/**
+ * Removes the event just dealt with and moves on to the next. Clearing the schedule is a separate
+ * write that only applies to an empty queue, so an event queued in between is not left unscheduled.
+ */
+export async function finishEventDelivery(
+  id: string,
+  eventId?: string,
+  dead?: { deadEvent?: QueuedEvent; error: string }
+): Promise<void> {
+  await SignRequestModel.updateOne(
+    { _id: id },
+    {
+      $set: { eventAttempts: 0, eventsLockedUntil: null, eventsNextAttemptAt: new Date() },
+      ...(eventId ? { $pull: { pendingEvents: { id: eventId } } } : {}),
+      ...(dead?.deadEvent
+        ? { $push: { deadEvents: { ...dead.deadEvent, error: dead.error, failedAt: new Date() } } }
+        : {}),
+    },
+    { timestamps: false }
+  );
+
+  await SignRequestModel.updateOne(
+    { _id: id, $or: [{ pendingEvents: { $size: 0 } }, { pendingEvents: { $exists: false } }] },
+    { $set: { eventsNextAttemptAt: null } },
+    { timestamps: false }
+  );
+}
+
+/** Every signer signed but the envelope never completed, with no change since `before`. */
+export async function findStuckEnvelopes(before: Date): Promise<SignRequest[]> {
+  const docs = await SignRequestModel.find({
+    status: "in_progress",
+    updatedAt: { $lte: before },
+    signers: { $not: { $elemMatch: { status: { $ne: "signed" } } } },
+  }).lean();
+
+  return (docs as unknown as SignRequestDoc[]).map(toSignRequest);
 }

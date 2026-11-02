@@ -5,6 +5,7 @@ import { asyncHandler } from "../../utils/async-handler";
 import {
   cancel,
   createSalesforceEnvelope,
+  getSignedPdf,
   sendSalesforceEnvelope,
 } from "../sign-requests/sign-request.service";
 import { isSignerRole, type SignRequest, type SignerRole } from "../sign-requests/sign-request.types";
@@ -109,6 +110,24 @@ export const createEnvelope = asyncHandler(async (req: Request, res: Response) =
 export const sendEnvelope = asyncHandler(async (req: Request, res: Response) => {
   const sent = await sendSalesforceEnvelope(req.params.id, orgIdOf(req));
   return res.json(toEnvelopeResponse(sent));
+});
+
+/** GET /v1/envelopes/:id/signed-pdf */
+export const getEnvelopeSignedPdf = asyncHandler(async (req: Request, res: Response) => {
+  const { buffer, fileName } = await getSignedPdf(req.params.id, orgIdOf(req));
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"`);
+  return res.send(buffer);
+});
+
+/**
+ * GET /v1/envelopes/:id/certificate
+ *
+ * Salesforce asks for this every time an envelope completes, and writes the reason it failed to
+ * the request's `Writeback_Result__c`. So it gets a sentence rather than a bare route-not-found.
+ */
+export const getEnvelopeCertificate = asyncHandler(async () => {
+  throw new AppError("Certificates of completion are not available yet.", 404, "NOT_AVAILABLE");
 });
 
 /** POST /v1/envelopes/:id/void */

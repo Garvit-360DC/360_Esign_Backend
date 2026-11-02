@@ -5,7 +5,13 @@ import { authenticateTokenV1 } from "../../middleware/authenticateTokenV1.middle
 import { formatZodError, isZodError } from "../../middleware/validation.middleware";
 import { AppError } from "../../utils/appError";
 import { healthRoutes } from "../health/health.routes";
-import { createEnvelope, sendEnvelope, voidEnvelope } from "./envelope.controller";
+import {
+  createEnvelope,
+  getEnvelopeCertificate,
+  getEnvelopeSignedPdf,
+  sendEnvelope,
+  voidEnvelope,
+} from "./envelope.controller";
 
 /**
  * Everything Salesforce calls, mounted at /v1. It sits ahead of the app's general rate limit and
@@ -57,6 +63,8 @@ router.use("/health", healthRoutes);
 router.post("/envelopes", authenticateTokenV1, createEnvelope);
 router.post("/envelopes/:id/send", authenticateTokenV1, sendEnvelope);
 router.post("/envelopes/:id/void", authenticateTokenV1, voidEnvelope);
+router.get("/envelopes/:id/signed-pdf", authenticateTokenV1, getEnvelopeSignedPdf);
+router.get("/envelopes/:id/certificate", authenticateTokenV1, getEnvelopeCertificate);
 
 router.use((req: Request, _res: Response, next: NextFunction) => {
   next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404, "NOT_FOUND"));

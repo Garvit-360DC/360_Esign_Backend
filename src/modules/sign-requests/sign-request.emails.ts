@@ -92,10 +92,10 @@ export function buildSignatureInvites(request: SignRequest): MailMessage[] {
   });
 }
 
-/** Returns how many went out, for callers that must not report a send that reached nobody. */
-export async function sendSignatureInvites(request: SignRequest): Promise<number> {
-  const { sent } = await sendAll(buildSignatureInvites(request));
-  return sent;
+/** Returns the signers it could not reach, for callers that must not report a failed send as sent. */
+export async function sendSignatureInvites(request: SignRequest): Promise<Signer[]> {
+  const { results } = await sendAll(buildSignatureInvites(request));
+  return request.signers.filter((_, index) => !results[index]);
 }
 
 /** Whole days since a date, for "waiting 3 days" phrasing. */

@@ -68,6 +68,7 @@ These answers can change the work below, so do them before building.
 | S8 | Offer only templates with `Sign_Enabled__c` checked in Send for Signature. | `getSendContext` | This flag separates documents with a signature from documents without one. It isn't checked today, so every active template is offered. |
 | S16 | Block sending when a template has no signer boxes, with a clear message. Remove the fallback that adds "Signer 1" and an appended page. | `prepareSend`, `instantSignSendAction` | Documents without a signature don't go through signing, and x360-esign can't append a page. |
 | S17 | Hide the `Email code` option and always send `None`. | `instantSignTemplateEditor`, `instantSignSendAction` | Not being built for now. |
+| S18 | Hide CC recipients until Phase 5. | `instantSignSendAction` | x360-esign refuses them for now, so a send that includes one fails. |
 
 ### Should fix before go-live
 
@@ -187,13 +188,18 @@ Events: `recipient.viewed`, `recipient.signed`, `recipient.declined`, `recipient
 `envelope.completed`, `envelope.declined`, `envelope.voided`, `envelope.expired`.
 
 - **Signature:** header `X-InstantSign-Signature` = base64 of HMAC-SHA256 of the body, using a secret
-  per org that matches `Callback_Secret__c`.
-- **Delivery:** write each event to an outbox in the same database operation as the status change. A
-  worker sends them with retries and a dead-letter state.
-- **Order:** the signed PDF must exist before `envelope.completed` goes out, because Salesforce fetches
-  it immediately.
-- **Bounces:** SMTP only reports failures it sees at send time. Later bounces need a mail provider
-  webhook, so treat that as a later item.
+  per org that matches `Callback_Secret__c`. Each org's secret is derived from `CALLBACK_SIGNING_KEY`,
+  so none are stored. `npm run callback:secret -- <orgId>` prints the value for an org's admin.
+- **Delivery:** each event is queued on the envelope, in the same write as the status change. A worker
+  sends them in order per envelope, with retries over about 8 hours, then sets them aside in
+  `deadEvents`.
+- **Order:** Salesforce fetches the signed PDF when it gets the last `recipient.signed`, not on
+  `envelope.completed`, and it fetches only once. So the worker holds that event until the envelope is
+  complete and the PDF exists.
+- **Crash recovery:** an envelope left fully signed but incomplete is finished after 5 minutes.
+- **Bounces:** email goes through SendGrid, which accepts a message and then tries to deliver it. So
+  `recipient.bounced` only covers a message SendGrid refuses outright. Real bounces need its Event
+  Webhook, which is a later item.
 
 ### 3.4 Fix before go-live
 
@@ -266,7 +272,7 @@ Phase 6. CC recipients are refused until Phase 5. Expiry and reminder days are s
 
 Owner: Salesforce team.
 
-- S1–S8, S16 and S17.
+- S1–S8 and S16–S18. See `salesforce-handoff.md`.
 
 **Done when** a rep sends from the test org and signers can sign. Status doesn't update yet.
 
@@ -274,8 +280,9 @@ Owner: Salesforce team.
 
 Owner: both.
 
-- **x360-esign:** outbox, callbacks and `/signed-pdf`.
-- **Salesforce:** S12–S14.
+- [x] **x360-esign:** outbox, callbacks and `/signed-pdf`.
+- [ ] **Salesforce:** S12–S14. See `salesforce-handoff.md`.
+- [ ] Test against the real test org.
 
 **Done when** Version 1 is met: a rep can send a Word add-in template with two signers from an
 Opportunity, both sign in `esgin-front`, the status updates on the record, and the signed PDF appears

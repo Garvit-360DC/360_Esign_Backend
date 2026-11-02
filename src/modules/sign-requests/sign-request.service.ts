@@ -11,6 +11,7 @@ import {
   sendSignatureInvites,
 } from "./sign-request.emails";
 import { createDraftRecord, deleteDraft, findDraft } from "./sign-request.drafts";
+import { buildEvent, typedValuesFor } from "./sign-request.events";
 import { toSignatureFields } from "./sign-request.layout";
 import { countPages, locatePlaceholders } from "./sign-request.locator";
 import {
@@ -22,6 +23,7 @@ import {
 import { detectSignatureFields, extractSignatureFields } from "./sign-request.placeholders";
 import { assertStampableImage, erasePlaceholders, stampSignatures } from "./sign-request.stamp";
 import {
+  appendEvents,
   createSignRequest,
   findById,
   getFileBuffer,
@@ -336,8 +338,8 @@ export async function sendSalesforceEnvelope(id: string, orgId: string): Promise
     return loadOwnRequest(id, orgId);
   }
 
-  const delivered = await sendSignatureInvites(sending);
-  if (delivered === 0) {
+  const failed = await sendSignatureInvites(sending);
+  if (failed.length === sending.signers.length) {
     await transitionSignRequest(id, "draft", { fromStatuses: ["pending"] });
     throw new AppError(
       "The invitations could not be delivered. Check the mail server settings and try again.",
@@ -346,7 +348,35 @@ export async function sendSalesforceEnvelope(id: string, orgId: string): Promise
     );
   }
 
+  // Only what SendGrid refused outright. A later bounce needs its Event Webhook.
+  await appendEvents(
+    id,
+    failed.flatMap((signer) =>
+      buildEvent(sending, "recipient.bounced", {
+        signer,
+        detail: "The invitation could not be delivered.",
+      })
+    )
+  );
+
   return sending;
+}
+
+/** The stamped PDF, for Salesforce to save to the record once the envelope is complete. */
+export async function getSignedPdf(
+  id: string,
+  orgId: string
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const request = await loadOwnRequest(id, orgId);
+
+  if (request.status !== "completed" || !request.signedPdfFileId) {
+    throw new AppError("This envelope has not been completed yet.", 409, "NOT_COMPLETED");
+  }
+
+  return {
+    buffer: await getFileBuffer(request.signedPdfFileId),
+    fileName: pdfFileName(request.fileName),
+  };
 }
 
 /**
@@ -673,6 +703,7 @@ export async function cancel(
   const updated = await transitionSignRequest(request.id, "cancelled", {
     fromStatuses: ["draft", "pending", "in_progress", "declined"],
     voidReason: reason,
+    events: buildEvent(request, "envelope.voided", { reason }),
   });
   if (!updated) {
     throw new AppError(
@@ -781,7 +812,11 @@ export async function getSession(
       request.id,
       signer.id,
       { status: "viewed", viewedAt: new Date() },
-      { fromStatuses: ["pending"], requestStatus: "in_progress" }
+      {
+        fromStatuses: ["pending"],
+        requestStatus: "in_progress",
+        events: buildEvent(request, "recipient.viewed", { signer }),
+      }
     );
     // Reloaded either way: no match means another tab got there first, or it was just voided.
     const latest = await loadRequest(id);
@@ -907,12 +942,18 @@ export async function completeSigning(
   const now = new Date();
   const previous = { status: signer.status, viewedAt: signer.viewedAt };
 
+  // Fields this signer saved are read from `request`, loaded after they were saved.
+  const signedEvent = buildEvent(request, "recipient.signed", {
+    signer,
+    typedValues: typedValuesFor(request, signer),
+  });
+
   const updated = await updateSigner(
     request.id,
     signer.id,
     // A signer who never opened the landing screen still counts as having viewed it.
     { status: "signed", signedAt: now, viewedAt: signer.viewedAt ?? now },
-    { fromStatuses: ["pending", "viewed"], requestStatus: "in_progress" }
+    { fromStatuses: ["pending", "viewed"], requestStatus: "in_progress", events: signedEvent }
   );
   if (!updated) throw envelopeMovedOn();
 
@@ -920,28 +961,18 @@ export async function completeSigning(
     return { waitingForOthers: true, downloadUrl: null };
   }
 
-  // Only the signer whose write left everyone signed gets here. The envelope is marked complete
-  // after the signed PDF is stored, so nobody told it is complete can fetch a missing file.
+  // Only the signer whose write left everyone signed gets here.
   let completed: SignRequest | null;
   try {
-    const pdf = await getFileBuffer(updated.pdfFileId);
-    const signed = await stampSignatures(pdf, updated.signatureFields);
-    const signedPdfFileId = await saveDocumentFile(
-      signed,
-      pdfFileName(updated.fileName),
-      "application/pdf"
-    );
-    completed = await transitionSignRequest(updated.id, "completed", {
-      signedPdfFileId,
-      completedAt: now,
-    });
+    completed = await stampAndComplete(updated, now);
   } catch (error) {
     // Otherwise this signer could never retry, and the envelope would stay stuck unfinished.
+    // Their event has not gone out: the worker holds it until the envelope is complete.
     await updateSigner(
       updated.id,
       signer.id,
       { status: previous.status, signedAt: null, viewedAt: previous.viewedAt },
-      { fromStatuses: ["signed"] }
+      { fromStatuses: ["signed"], removeEventId: signedEvent[0]?.id }
     );
     throw error;
   }
@@ -953,6 +984,32 @@ export async function completeSigning(
     waitingForOthers: false,
     downloadUrl: buildDocumentUrl(completed.id, signer.token),
   };
+}
+
+/**
+ * The envelope is marked complete only after the signed PDF is stored, in one write with its
+ * event, so nobody told it is complete can fetch a missing file.
+ */
+async function stampAndComplete(request: SignRequest, now: Date): Promise<SignRequest | null> {
+  const pdf = await getFileBuffer(request.pdfFileId);
+  const signed = await stampSignatures(pdf, request.signatureFields);
+  const signedPdfFileId = await saveDocumentFile(
+    signed,
+    pdfFileName(request.fileName),
+    "application/pdf"
+  );
+
+  return transitionSignRequest(request.id, "completed", {
+    signedPdfFileId,
+    completedAt: now,
+    events: buildEvent(request, "envelope.completed"),
+  });
+}
+
+/** For an envelope left fully signed by a crash. See `finishStuckEnvelopes`. */
+export async function finishEnvelope(request: SignRequest): Promise<void> {
+  const completed = await stampAndComplete(request, new Date());
+  if (completed) await sendCompletionNotices(completed);
 }
 
 export async function declineSigning(
@@ -968,7 +1025,15 @@ export async function declineSigning(
     request.id,
     signer.id,
     { status: "declined", declineReason: reason, declinedAt: new Date() },
-    { fromStatuses: ["pending", "viewed"], requestStatus: "declined" }
+    {
+      fromStatuses: ["pending", "viewed"],
+      requestStatus: "declined",
+      // Both carry the reason: Salesforce overwrites its copy with whatever each one says.
+      events: [
+        ...buildEvent(request, "recipient.declined", { signer, reason }),
+        ...buildEvent(request, "envelope.declined", { reason }),
+      ],
+    }
   );
   if (!updated) throw envelopeMovedOn();
 

@@ -2,10 +2,12 @@ import { createApp } from "./app";
 import { connectDb } from "./config/database";
 import { env } from "./config/env";
 import { logger } from "./config/logger";
+import { startEventWorker } from "./modules/sign-requests/sign-request.event-worker";
 
 async function main() {
   await connectDb();
   const app = createApp();
+  startEventWorker();
   app.listen(env.PORT, () => {
     logger.info(`x360-esign listening on port ${env.PORT}`);
   });
