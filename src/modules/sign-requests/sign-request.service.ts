@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { logger } from "../../config/logger";
 import { convertDocxToPdf } from "../../integrations/convertapi";
 import { isMailEnabled } from "../../integrations/mail";
+import { downloadContentVersion, type OrgDetails } from "../../integrations/salesforce";
 import { AppError } from "../../utils/appError";
 import {
   sendCompletionNotices,
@@ -21,7 +22,6 @@ import {
 import { detectSignatureFields, extractSignatureFields } from "./sign-request.placeholders";
 import { assertStampableImage, erasePlaceholders, stampSignatures } from "./sign-request.stamp";
 import {
-  closeSignRequest,
   createSignRequest,
   findById,
   getFileBuffer,
@@ -31,6 +31,7 @@ import {
   markSignersReminded,
   saveDocumentFile,
   setFieldValues,
+  transitionSignRequest,
   updateSigner,
   type ListFilter,
 } from "./sign-request.repository";
@@ -53,6 +54,8 @@ import type {
   SignerInput,
   SignerRole,
 } from "./sign-request.types";
+
+const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 function newToken(): string {
   return randomBytes(24).toString("hex");
@@ -119,6 +122,11 @@ async function loadOwnRequest(id: string, orgId: string): Promise<SignRequest> {
 function requireSigner(request: SignRequest, recipientId: string, token: string): Signer {
   const signer = request.signers.find((item) => item.id === recipientId);
   if (!signer || signer.token !== token) {
+    throw new AppError("This signing link is invalid or has expired.", 404, "INVALID_LINK");
+  }
+
+  // Nobody has been sent this link yet, and the envelope may still be abandoned.
+  if (request.status === "draft") {
     throw new AppError("This signing link is invalid or has expired.", 404, "INVALID_LINK");
   }
 
@@ -202,6 +210,144 @@ export async function create(input: CreateSignRequestInput): Promise<PublicSignR
 
 /** How long to let placeholder location run before falling back to manual placement. */
 const LOCATE_TIMEOUT_MS = 20_000;
+/** Conversion's share of the 120-second limit on the Apex callout that is waiting for it. */
+const CONVERT_TIMEOUT_MS = 70_000;
+
+/**
+ * Creates an envelope from a document already in Salesforce, without sending it.
+ *
+ * Unlike `createDraft`, there is no sender here to drag boxes into place, so a box that cannot
+ * be located fails the request rather than falling back to a default layout. The document is
+ * downloaded once and kept, because Salesforce can add new versions to the same file later.
+ */
+export async function createSalesforceEnvelope(input: {
+  orgId: string;
+  session: OrgDetails;
+  documentVersionId: string;
+  documentName: string;
+  subject?: string;
+  message?: string;
+  signers: (SignerInput & { order: number; salesforceRecipientId?: string })[];
+  salesforce: NonNullable<SignRequest["salesforce"]>;
+}): Promise<SignRequest> {
+  const { buffer, fileExtension } = await downloadContentVersion(
+    input.session,
+    input.documentVersionId
+  );
+
+  if ((fileExtension || "").toLowerCase() !== "docx") {
+    throw new AppError(
+      `The generated document is a ${fileExtension || "unknown"} file. Sending for signature needs a Word (.docx) document.`,
+      400,
+      "NOT_A_WORD_DOCUMENT"
+    );
+  }
+
+  const detected = extractSignatureFields(buffer);
+  assertSignersMatchFields(
+    input.signers.map((signer) => signer.role),
+    detected.map((field) => ({ role: field.role, type: field.type }))
+  );
+
+  const fileName = /\.docx$/i.test(input.documentName)
+    ? input.documentName
+    : `${input.documentName}.docx`;
+
+  const converted = await withDeadline(convertDocxToPdf(buffer, fileName), CONVERT_TIMEOUT_MS);
+  if (!converted) {
+    throw new AppError("Converting the document took too long. Please try again.", 504, "CONVERSION_TIMEOUT");
+  }
+
+  const placed = await withDeadline(locatePlaceholders(converted, detected), LOCATE_TIMEOUT_MS);
+  if (!placed) {
+    throw new AppError(
+      "Could not find the signature boxes in the converted document.",
+      502,
+      "PLACEMENT_FAILED"
+    );
+  }
+
+  let pdf = converted;
+  try {
+    pdf = await erasePlaceholders(
+      converted,
+      placed.located.map((entry) => ({ page: entry.page, rect: entry.artwork }))
+    );
+  } catch (error) {
+    logger.warn("Could not erase placeholder artwork; keeping the converted PDF as it is", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const fileId = await saveDocumentFile(buffer, fileName, DOCX_MIME_TYPE);
+  const pdfFileId = await saveDocumentFile(pdf, pdfFileName(fileName), "application/pdf");
+
+  return createSignRequest({
+    orgId: input.orgId,
+    status: "draft",
+    subject: input.subject,
+    message: input.message,
+    salesforce: input.salesforce,
+    fileName,
+    fileId,
+    pdfFileId,
+    pageCount: placed.pageCount,
+    mimeType: DOCX_MIME_TYPE,
+    signers: input.signers.map((signer) => ({
+      ...signer,
+      token: newToken(),
+      status: "pending",
+      declineReason: null,
+      viewedAt: null,
+      signedAt: null,
+      declinedAt: null,
+      remindedAt: null,
+    })),
+    signatureFields: toSignatureFields(detected, placed.located),
+  });
+}
+
+/**
+ * Starts the signing flow for a draft envelope.
+ *
+ * Sending twice is safe, because Salesforce may retry after a lost response: only the call that
+ * moves the envelope out of `draft` emails anyone. Delivery is the point of this call, so unlike
+ * the console's upload it fails if nobody was reached, and the envelope stays ready to resend.
+ */
+export async function sendSalesforceEnvelope(id: string, orgId: string): Promise<SignRequest> {
+  const request = await loadOwnRequest(id, orgId);
+
+  if (request.status === "pending" || request.status === "in_progress") {
+    return request;
+  }
+  if (request.status !== "draft") {
+    throw new AppError("This envelope is closed, so it cannot be sent.", 409, "ENVELOPE_CLOSED");
+  }
+  if (!isMailEnabled()) {
+    throw new AppError(
+      "Email is not configured on the signing service, so the invitations cannot be sent.",
+      503,
+      "MAIL_DISABLED"
+    );
+  }
+
+  const sending = await transitionSignRequest(id, "pending", { fromStatuses: ["draft"] });
+  if (!sending) {
+    return loadOwnRequest(id, orgId);
+  }
+
+  const delivered = await sendSignatureInvites(sending);
+  if (delivered === 0) {
+    await transitionSignRequest(id, "draft", { fromStatuses: ["pending"] });
+    throw new AppError(
+      "The invitations could not be delivered. Check the mail server settings and try again.",
+      502,
+      "MAIL_FAILED"
+    );
+  }
+
+  return sending;
+}
 
 /**
  * Resolves to null if the work outruns the deadline. The underlying promise is not
@@ -505,7 +651,11 @@ export async function getById(id: string, orgId: string): Promise<SignRequestDet
   return { ...toPublicSignRequest(request), documents };
 }
 
-export async function cancel(id: string, orgId: string): Promise<PublicSignRequest> {
+export async function cancel(
+  id: string,
+  orgId: string,
+  reason?: string
+): Promise<PublicSignRequest> {
   const request = await loadOwnRequest(id, orgId);
 
   if (request.status === "completed") {
@@ -520,8 +670,9 @@ export async function cancel(id: string, orgId: string): Promise<PublicSignReque
     return toPublicSignRequest(request);
   }
 
-  const updated = await closeSignRequest(request.id, "cancelled", {
-    fromStatuses: ["pending", "in_progress", "declined"],
+  const updated = await transitionSignRequest(request.id, "cancelled", {
+    fromStatuses: ["draft", "pending", "in_progress", "declined"],
+    voidReason: reason,
   });
   if (!updated) {
     throw new AppError(
@@ -780,7 +931,7 @@ export async function completeSigning(
       pdfFileName(updated.fileName),
       "application/pdf"
     );
-    completed = await closeSignRequest(updated.id, "completed", {
+    completed = await transitionSignRequest(updated.id, "completed", {
       signedPdfFileId,
       completedAt: now,
     });

@@ -27,6 +27,8 @@ const signerSchema = new Schema(
       enum: ["pending", "viewed", "signed", "declined"],
       default: "pending",
     },
+    order: { type: Number },
+    salesforceRecipientId: { type: String, default: null },
     declineReason: { type: String, default: null },
     viewedAt: { type: Date, default: null },
     signedAt: { type: Date, default: null },
@@ -71,9 +73,13 @@ const signRequestSchema = new Schema(
     status: {
       type: String,
       required: true,
-      enum: ["pending", "in_progress", "completed", "cancelled", "declined"],
+      enum: ["draft", "pending", "in_progress", "completed", "cancelled", "declined"],
       default: "pending",
     },
+    subject: { type: String, default: null },
+    message: { type: String, default: null },
+    voidReason: { type: String, default: null },
+    salesforce: { type: Schema.Types.Mixed, default: null },
     fileName: { type: String, required: true },
     fileId: { type: Schema.Types.ObjectId, required: true },
     pdfFileId: { type: Schema.Types.ObjectId, required: true },
@@ -99,6 +105,8 @@ type SignerDoc = {
   email: string;
   token: string;
   status: Signer["status"];
+  order?: number;
+  salesforceRecipientId?: string | null;
   declineReason: string | null;
   viewedAt: Date | null;
   signedAt: Date | null;
@@ -113,6 +121,10 @@ type SignRequestDoc = {
   _id: mongoose.Types.ObjectId;
   orgId: string;
   status: SignRequest["status"];
+  subject?: string | null;
+  message?: string | null;
+  voidReason?: string | null;
+  salesforce?: SignRequest["salesforce"];
   fileName: string;
   fileId: mongoose.Types.ObjectId;
   pdfFileId: mongoose.Types.ObjectId;
@@ -142,6 +154,8 @@ function toSigner(doc: SignerDoc): Signer {
     email: doc.email,
     token: doc.token,
     status: doc.status,
+    order: doc.order,
+    salesforceRecipientId: doc.salesforceRecipientId ?? null,
     declineReason: doc.declineReason ?? null,
     viewedAt: doc.viewedAt ?? null,
     signedAt: doc.signedAt ?? null,
@@ -155,6 +169,10 @@ function toSignRequest(doc: SignRequestDoc): SignRequest {
     id: String(doc._id),
     orgId: doc.orgId,
     status: doc.status,
+    subject: doc.subject ?? null,
+    message: doc.message ?? null,
+    voidReason: doc.voidReason ?? null,
+    salesforce: doc.salesforce ?? null,
     fileName: doc.fileName,
     fileId: String(doc.fileId),
     pdfFileId: String(doc.pdfFileId),
@@ -243,10 +261,17 @@ export async function createSignRequest(data: {
   mimeType: string;
   signers: Omit<Signer, "id">[];
   signatureFields: SignatureField[];
+  status?: SignRequestStatus;
+  subject?: string | null;
+  message?: string | null;
+  salesforce?: SignRequest["salesforce"];
 }): Promise<SignRequest> {
   const created = await SignRequestModel.create({
     orgId: data.orgId,
-    status: "pending",
+    status: data.status ?? "pending",
+    subject: data.subject ?? null,
+    message: data.message ?? null,
+    salesforce: data.salesforce ?? null,
     fileName: data.fileName,
     fileId: new mongoose.Types.ObjectId(data.fileId),
     pdfFileId: new mongoose.Types.ObjectId(data.pdfFileId),
@@ -309,7 +334,7 @@ export async function listSignRequests(
   const term = filter.q ? new RegExp(escapeRegExp(filter.q), "i") : null;
   const query = {
     orgId,
-    ...(filter.status ? { status: filter.status } : {}),
+    status: filter.status ?? { $ne: "draft" },
     ...(term
       ? {
           $or: [
@@ -377,7 +402,7 @@ export async function getStats(now: Date, orgId: string): Promise<SignRequestSta
     updatedAt: Date;
   };
 
-  const rows = (await SignRequestModel.find({ orgId })
+  const rows = (await SignRequestModel.find({ orgId, status: { $ne: "draft" } })
     .select("status signers.status createdAt updatedAt")
     .lean()) as unknown as StatRow[];
 
@@ -536,16 +561,17 @@ export async function markSignersReminded(
 }
 
 /**
- * Moves an envelope to a final status, if it is still in one of `fromStatuses`. Returns null
- * if it has moved on, so a void and a completion cannot both win.
+ * Moves an envelope to a new status, if it is still in one of `fromStatuses`. Returns null if
+ * it has moved on, so a void and a completion cannot both win, and two sends cannot both send.
  */
-export async function closeSignRequest(
+export async function transitionSignRequest(
   id: string,
   status: SignRequestStatus,
   options: {
     fromStatuses?: SignRequestStatus[];
     signedPdfFileId?: string;
     completedAt?: Date;
+    voidReason?: string;
   } = {}
 ): Promise<SignRequest | null> {
   const updated = await SignRequestModel.findOneAndUpdate(
@@ -557,6 +583,7 @@ export async function closeSignRequest(
           ? { signedPdfFileId: new mongoose.Types.ObjectId(options.signedPdfFileId) }
           : {}),
         ...(options.completedAt ? { completedAt: options.completedAt } : {}),
+        ...(options.voidReason ? { voidReason: options.voidReason } : {}),
       },
     },
     { new: true }

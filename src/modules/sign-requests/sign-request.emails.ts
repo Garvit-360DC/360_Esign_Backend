@@ -45,12 +45,13 @@ export function buildSignatureInvites(request: SignRequest): MailMessage[] {
 
     return {
       to: signer.email,
-      subject: `Signature requested: ${request.fileName}`,
+      subject: request.subject || `Signature requested: ${request.fileName}`,
       html: layout({
         preheader: `${request.fileName} is waiting for your signature.`,
         eyebrow: { text: "Signature requested", tone: "verified" },
         heading: `${signer.name}, please sign ${request.fileName}`,
         body:
+          (request.message ? paragraph(escapeHtml(request.message)) : "") +
           paragraph(
             "You have been asked to sign this document electronically. It should take a couple of minutes — no account needed."
           ) +
@@ -74,6 +75,7 @@ export function buildSignatureInvites(request: SignRequest): MailMessage[] {
       text: plainText([
         `${signer.name}, please sign ${request.fileName}`,
         "",
+        ...(request.message ? [request.message, ""] : []),
         "You have been asked to sign this document electronically.",
         "",
         `Document: ${request.fileName}`,
@@ -90,8 +92,10 @@ export function buildSignatureInvites(request: SignRequest): MailMessage[] {
   });
 }
 
-export async function sendSignatureInvites(request: SignRequest): Promise<void> {
-  await sendAll(buildSignatureInvites(request));
+/** Returns how many went out, for callers that must not report a send that reached nobody. */
+export async function sendSignatureInvites(request: SignRequest): Promise<number> {
+  const { sent } = await sendAll(buildSignatureInvites(request));
+  return sent;
 }
 
 /** Whole days since a date, for "waiting 3 days" phrasing. */

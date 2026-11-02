@@ -253,10 +253,14 @@ step, taken when Phase 2 is ready to test.
 
 Owner: x360-esign.
 
-- `POST /v1/envelopes`, `/send`, `/void` and `GET /v1/health`, with `{ "message": "..." }` errors.
-- Download and keep a copy of the document from Salesforce.
+- [x] `POST /v1/envelopes`, `/send`, `/void` and `GET /v1/health`, with `{ "message": "..." }` errors.
+- [x] Download and keep a copy of the document from Salesforce.
+- [ ] Test against the real test org: real token, real generated document, ConvertAPI and SMTP.
 
 **Done when** a request matching `InstantSignServiceClient` creates, sends and voids an envelope.
+
+Version 1 limits: everyone is invited at once, whatever their `order`, until sequential sending in
+Phase 6. CC recipients are refused until Phase 5. Expiry and reminder days are stored but not acted on.
 
 ### Phase 3: First real send
 
@@ -288,5 +292,6 @@ Owner: both.
 Owner: x360-esign.
 
 - Sequential sending, scheduled reminders and expiry, audit trail, certificate, third-party seal.
+- Clean up abandoned draft envelopes and their files.
 
 The test org expires on 2026-11-22, during Phases 2–4, so a replacement is needed before then.

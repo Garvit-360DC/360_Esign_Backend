@@ -110,7 +110,11 @@ export const SIGN_REQUEST_STATUSES = [
   "cancelled",
   "declined",
 ] as const;
-export type SignRequestStatus = (typeof SIGN_REQUEST_STATUSES)[number];
+/**
+ * `draft` is an envelope Salesforce has created but not sent. It is left out of the list above
+ * because the console never shows one: its signing links do not work until it is sent.
+ */
+export type SignRequestStatus = (typeof SIGN_REQUEST_STATUSES)[number] | "draft";
 /** Where a field came from: an add-in picture, a literal text tag, or placed by hand. */
 export type SignatureFieldSource = "image" | "text" | "manual";
 
@@ -139,6 +143,10 @@ export type Signer = SignerInput & {
   declinedAt: Date | null;
   /** When a reminder was last sent to them. Null until the sender nudges them. */
   remindedAt: Date | null;
+  /** Signing step from Salesforce. Stored for sequential sending; everyone is invited at once. */
+  order?: number;
+  /** `Signature_Request_Recipient__c` id, echoed back in status callbacks. */
+  salesforceRecipientId?: string | null;
 };
 
 export type PublicSigner = Omit<Signer, "token"> & {
@@ -163,11 +171,31 @@ export type SignatureField = DetectedPlaceholder & {
   value?: string | null;
 };
 
+/** What Salesforce sent with an envelope. Absent on envelopes made in the console. */
+export type SalesforceEnvelopeInfo = {
+  /** The `dbtokens` row to use when calling this org back. */
+  productName: string | null;
+  documentVersionId: string;
+  callbackUrl: string;
+  salesforceRequestId?: string;
+  sourceObjectType?: string;
+  sourceObjectId?: string;
+  routingType?: string;
+  expiresInDays?: number;
+  remindEveryDays?: number;
+  branding?: Record<string, string>;
+};
+
 export type SignRequest = {
   id: string;
   /** The Salesforce org that owns this envelope. Every sender-facing query filters on it. */
   orgId: string;
   status: SignRequestStatus;
+  /** Invitation subject and message. Without them the invitation uses its default wording. */
+  subject?: string | null;
+  message?: string | null;
+  voidReason?: string | null;
+  salesforce?: SalesforceEnvelopeInfo | null;
   fileName: string;
   fileId: string;
   pdfFileId: string;
