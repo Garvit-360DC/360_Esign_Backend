@@ -48,9 +48,12 @@ These answers can change the work below, so do them before building.
    `{%signer1}` as a Salesforce field. `parseDocument.js` now keeps them unchanged, and a built `.docx`
    passes `extractSignatureFields`. Still to test: a real add-in template in the test org, and a box
    inside a loop, which would repeat it.
-2. **Test org.** Use scratch org `00Ddi00000FANNp`, namespace `x360dc`. Checked 2026-11-02: it has the
-   InstantSign objects, classes, LWCs and permission sets. It expires 2026-11-22, so plan for a
-   replacement if testing runs past that date.
+2. **Test org.** Use scratch org `00Ddi00000FANNp`, namespace `x360dc`, for development only. Checked
+   2026-11-02: it has the InstantSign objects, classes, LWCs and permission sets. It expires
+   2026-11-22, so plan for a replacement if development runs past that date. The finished code moves
+   to a new Salesforce org and then the marketplace.
+3. **Callback secrets for marketplace customers.** Secrets are entered by hand today, which won't work
+   for customer orgs. How a customer org gets its secret still has to be decided before packaging.
 
 ## 2. Salesforce app: what to change
 
@@ -63,7 +66,7 @@ These answers can change the work below, so do them before building.
 | S3 | Generate `DOCX` instead of `PDF` for sends. Keep PDF for the preview. | `documentManagerInput` | x360-esign needs the `.docx` to find the boxes. |
 | S4 | Require `Service_Endpoint__c`. Remove the fallback to the connector URL. | `InstantSignServiceClient.endpoint` | With it blank, calls go to the connector, which has no such routes. |
 | S5 | Add a Remote Site Setting for the x360-esign host. | Metadata | Without it Apex can't make the callout. |
-| S6 | Send the `product-name` the token was issued for. | `HttpTransport` | The client sends `360 InstantSign`, but other callouts default to `360 File Sync`. Auth compares the product stored in the token, so this would be rejected. |
+| S6 | Send `360 File Sync` as the `product-name` (decided 2026-11-02). | `HttpTransport` | The client sends `360 InstantSign`, but the token belongs to `360 File Sync`. Auth compares the product stored in the token, so this would be rejected. |
 | S7 | Split `createAndSend` into two steps with the database save between them. | `InstantSignSendController.send`, `instantSignSendAction` | Today the envelope is sent before anything is saved. If the save fails, signers have emails and Salesforce has no record. Apex can't make a callout after an uncommitted save, so the LWC must make two calls: create and save as `Draft`, then send and set `Sent`. |
 | S8 | Offer only templates with `Sign_Enabled__c` checked in Send for Signature. | `getSendContext` | This flag separates documents with a signature from documents without one. It isn't checked today, so every active template is offered. |
 | S16 | Block sending when a template has no signer boxes, with a clear message. Remove the fallback that adds "Signer 1" and an appended page. | `prepareSend`, `instantSignSendAction` | Documents without a signature don't go through signing, and x360-esign can't append a page. |
@@ -78,7 +81,7 @@ These answers can change the work below, so do them before building.
 | S10 | Check that every signer role on the template is in the send payload. | `normaliseSlots` / `validate` |
 | S11 | Warn at setup when boxes are in a header or footer. x360-esign rejects them. | `InstantSignTemplateSync` |
 | S12 | Make the callback signature mandatory. A blank `Callback_Secret__c` currently accepts everything. | `signatureOk` |
-| S13 | Create a narrow permission set for the integration user. Only `InstantSign_Admin` can reach the callback today. The class runs with sharing, so requests that user can't see return 404. | Permission sets |
+| S13 | Use the Salesforce admin as the integration user (decided 2026-11-02), with `InstantSign_Admin` assigned. The class runs with sharing and `USER_MODE`, so the admin needs field access and must see every request, or the callback returns 404. | Permission sets |
 | S14 | Retry failed signed-PDF downloads. Today a failure is only written to `Writeback_Result__c`. | `InstantSignCompletionQueueable` |
 | S15 | Add `Sign_Email_Message__c`. The email message is hardcoded. | `Template__c`, `prepareSend` |
 
@@ -301,4 +304,4 @@ Owner: x360-esign.
 - Sequential sending, scheduled reminders and expiry, audit trail, certificate, third-party seal.
 - Clean up abandoned draft envelopes and their files.
 
-The test org expires on 2026-11-22, during Phases 2–4, so a replacement is needed before then.
+The development org expires on 2026-11-22, so it needs a replacement if work runs past that date.
