@@ -33,6 +33,13 @@ const envSchema = z.object({
   /** Signs the app JWT. `Token_Key_Value` in the connector. */
   JWT_SECRET: z.string().min(16, "JWT_SECRET must be at least 16 characters"),
 
+  // The connector's token encryption, for the routes Salesforce calls. Must match its values.
+  // Optional so the console runs without them; those routes refuse every request until set.
+  NODE_TOKEN_ENCRYPTION_KEY: z.string().optional(),
+  NODE_TOKEN_ENCRYPTION_IV: z.string().optional(),
+  /** Product assumed when a request names none. The connector's `DEFAULT_APP_NAME`. */
+  DEFAULT_APP_NAME: z.string().optional(),
+
   // Mail is optional. Without SMTP_HOST and MAIL_FROM the app runs exactly as before and
   // signing links are only handed back in the API response.
   SMTP_HOST: z.string().min(1).optional(),

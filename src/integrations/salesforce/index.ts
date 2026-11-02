@@ -21,6 +21,9 @@ const TIMEOUT_MS = 20_000;
 
 /** A refresh lock older than this is assumed abandoned by a crashed process. */
 const REFRESH_LOCK_TIMEOUT = 60 * 1000;
+const REFRESH_WAIT_INTERVAL = 150;
+/** Well inside the 120-second limit on the Apex callouts that can end up waiting here. */
+const MAX_REFRESH_WAIT = 20 * 1000;
 
 export type SalesforceTokens = {
   access_token: string;
@@ -33,6 +36,8 @@ export type SalesforceTokens = {
 /** Anything carrying enough to call Salesforce. A full org row satisfies it. */
 export type OrgDetails = {
   org_id?: string;
+  /** Set on a connector session. Refreshes go back to that row, not to the console's. */
+  productName?: string | null;
   accessToken: string | null;
   instance_url?: string | null;
   loginTypeSF?: string;
@@ -155,15 +160,20 @@ export async function refreshSalesforceToken(input: {
  *
  * Whoever takes the lock does the refresh; everyone else waits and re-reads the result.
  * Without it, N concurrent 401s become N refreshes, and Salesforce invalidates the earlier
- * tokens as each new one is issued.
+ * tokens as each new one is issued. On a connector row, the lock holder may be the connector.
  */
-async function getSalesforceToken(orgId: string): Promise<OrgDetails> {
-  const locked = await acquireRefreshLock(orgId, REFRESH_LOCK_TIMEOUT);
+async function getSalesforceToken(orgId: string, productName?: string | null): Promise<OrgDetails> {
+  const locked = await acquireRefreshLock(orgId, REFRESH_LOCK_TIMEOUT, productName);
 
   if (!locked) {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
-    const latest = await findOrgSession(orgId);
-    if (latest?.accessToken) return latest;
+    const deadline = Date.now() + MAX_REFRESH_WAIT;
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_WAIT_INTERVAL));
+      const latest = await findOrgSession(orgId, productName);
+      if (latest && !latest.isRefreshing && latest.accessToken) return latest;
+    }
+
     throw new AppError(
       "Salesforce session expired or revoked. Please re-authenticate.",
       401,
@@ -181,14 +191,18 @@ async function getSalesforceToken(orgId: string): Promise<OrgDetails> {
       environment: locked.loginTypeSF,
     });
 
-    return await updateOrgSession(orgId, {
-      accessToken: tokens.access_token,
-      // Salesforce only returns a new refresh token when rotation is on; keep the old one.
-      refreshToken: tokens.refresh_token || locked.refreshToken,
-      instance_url: tokens.instance_url || locked.instance_url,
-    });
+    return await updateOrgSession(
+      orgId,
+      {
+        accessToken: tokens.access_token,
+        // Salesforce only returns a new refresh token when rotation is on; keep the old one.
+        refreshToken: tokens.refresh_token || locked.refreshToken,
+        instance_url: tokens.instance_url || locked.instance_url,
+      },
+      productName
+    );
   } finally {
-    await releaseRefreshLock(orgId);
+    await releaseRefreshLock(orgId, productName);
   }
 }
 
@@ -236,7 +250,7 @@ export async function sfRequest<T = unknown>(
     }
 
     logger.info("Salesforce token expired, refreshing once", { orgId: current.org_id });
-    current = await getSalesforceToken(current.org_id);
+    current = await getSalesforceToken(current.org_id, current.productName);
     return doCall();
   }
 }

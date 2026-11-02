@@ -25,7 +25,7 @@ router.post("/auth/refresh", refreshToken);
 router.get("/sf/auth/callback", handleCallback);
 router.post("/auth/refresh-jwt", refreshJwt);
 
-// used by salesforce to get login URL and JWT Token
+// used by the console to get the login URL
 router.post("/getToken", getToken);
 router.get("/verify-jwt", verifyJwt);
 

@@ -6,6 +6,7 @@ import {
   SIGN_FIELD_TYPES,
   type SignFieldType,
   type SignRequest,
+  type SignRequestStatus,
   type SignRequestStats,
   type SignRequestSummary,
   type SignatureField,
@@ -478,39 +479,88 @@ export async function setFieldValues(
   return toSignRequest(updated as SignRequestDoc);
 }
 
+const OPEN_STATUSES: SignRequestStatus[] = ["pending", "in_progress"];
+
+type SignerPatch = Partial<
+  Pick<Signer, "status" | "declineReason" | "viewedAt" | "signedAt" | "declinedAt">
+>;
+
 /**
- * Note what is absent: `signatureFields`. Values are only ever written by `setFieldValues`,
- * so status changes here cannot roll back a signature saved by someone else in the meantime.
+ * Changes one signer in place, and only if the envelope is open and the signer is in one of
+ * `fromStatuses`. Returns the envelope as it stands after the write, or null if nothing matched.
+ *
+ * Deliberately not a read-modify-write of the `signers` array: two signers can act at the same
+ * moment, and writing back a copy loaded earlier would undo whatever the other one just did.
+ * Because each write is atomic, exactly one caller sees the write that leaves everyone signed.
  */
-export async function updateSignRequest(request: SignRequest): Promise<SignRequest> {
-  const updated = await SignRequestModel.findByIdAndUpdate(
-    request.id,
+export async function updateSigner(
+  id: string,
+  signerId: string,
+  patch: SignerPatch,
+  options: { fromStatuses: Signer["status"][]; requestStatus?: SignRequestStatus }
+): Promise<SignRequest | null> {
+  const $set: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    $set[`signers.$.${key}`] = value;
+  }
+  if (options.requestStatus) $set.status = options.requestStatus;
+
+  const updated = await SignRequestModel.findOneAndUpdate(
     {
-      status: request.status,
-      signedPdfFileId: request.signedPdfFileId
-        ? new mongoose.Types.ObjectId(request.signedPdfFileId)
-        : null,
-      signers: request.signers.map((signer) => ({
-        _id: new mongoose.Types.ObjectId(signer.id),
-        role: signer.role,
-        name: signer.name,
-        email: signer.email,
-        token: signer.token,
-        status: signer.status,
-        declineReason: signer.declineReason ?? null,
-        viewedAt: signer.viewedAt ?? null,
-        signedAt: signer.signedAt ?? null,
-        declinedAt: signer.declinedAt ?? null,
-        remindedAt: signer.remindedAt ?? null,
-      })),
-      completedAt: request.completedAt ?? null,
+      _id: id,
+      status: { $in: OPEN_STATUSES },
+      signers: { $elemMatch: { _id: signerId, status: { $in: options.fromStatuses } } },
+    },
+    { $set },
+    { new: true }
+  ).lean();
+
+  return updated ? toSignRequest(updated as SignRequestDoc) : null;
+}
+
+/** Stamps the time on the signers a reminder actually reached. */
+export async function markSignersReminded(
+  id: string,
+  signerIds: string[],
+  remindedAt: Date
+): Promise<void> {
+  await SignRequestModel.updateOne(
+    { _id: id },
+    { $set: { "signers.$[signer].remindedAt": remindedAt } },
+    {
+      arrayFilters: [
+        { "signer._id": { $in: signerIds.map((signerId) => new mongoose.Types.ObjectId(signerId)) } },
+      ],
+    }
+  );
+}
+
+/**
+ * Moves an envelope to a final status, if it is still in one of `fromStatuses`. Returns null
+ * if it has moved on, so a void and a completion cannot both win.
+ */
+export async function closeSignRequest(
+  id: string,
+  status: SignRequestStatus,
+  options: {
+    fromStatuses?: SignRequestStatus[];
+    signedPdfFileId?: string;
+    completedAt?: Date;
+  } = {}
+): Promise<SignRequest | null> {
+  const updated = await SignRequestModel.findOneAndUpdate(
+    { _id: id, status: { $in: options.fromStatuses ?? OPEN_STATUSES } },
+    {
+      $set: {
+        status,
+        ...(options.signedPdfFileId
+          ? { signedPdfFileId: new mongoose.Types.ObjectId(options.signedPdfFileId) }
+          : {}),
+        ...(options.completedAt ? { completedAt: options.completedAt } : {}),
+      },
     },
     { new: true }
   ).lean();
 
-  if (!updated) {
-    throw new AppError("Sign request not found", 404, "NOT_FOUND");
-  }
-
-  return toSignRequest(updated as SignRequestDoc);
+  return updated ? toSignRequest(updated as SignRequestDoc) : null;
 }

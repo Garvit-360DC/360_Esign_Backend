@@ -19,17 +19,19 @@ import {
   toPublicSignRequest,
 } from "./sign-request.mapper";
 import { detectSignatureFields, extractSignatureFields } from "./sign-request.placeholders";
-import { erasePlaceholders, stampSignatures } from "./sign-request.stamp";
+import { assertStampableImage, erasePlaceholders, stampSignatures } from "./sign-request.stamp";
 import {
+  closeSignRequest,
   createSignRequest,
   findById,
   getFileBuffer,
   getFileInfo,
   getStats,
   listSignRequests,
+  markSignersReminded,
   saveDocumentFile,
   setFieldValues,
-  updateSignRequest,
+  updateSigner,
   type ListFilter,
 } from "./sign-request.repository";
 import { FIELD_TYPE_META, isDrawnField, signerLabel } from "./sign-request.types";
@@ -518,8 +520,16 @@ export async function cancel(id: string, orgId: string): Promise<PublicSignReque
     return toPublicSignRequest(request);
   }
 
-  request.status = "cancelled";
-  const updated = await updateSignRequest(request);
+  const updated = await closeSignRequest(request.id, "cancelled", {
+    fromStatuses: ["pending", "in_progress", "declined"],
+  });
+  if (!updated) {
+    throw new AppError(
+      "This envelope has just closed and cannot be voided.",
+      409,
+      "ALREADY_DONE"
+    );
+  }
   return toPublicSignRequest(updated);
 }
 
@@ -587,12 +597,11 @@ export async function remind(
 
   // Stamped only for the ones that actually went out, so the timestamp means "they were
   // told" rather than "we tried".
-  const now = new Date();
-  const reminded = new Set(delivered.map((signer) => signer.id));
-  for (const signer of request.signers) {
-    if (reminded.has(signer.id)) signer.remindedAt = now;
-  }
-  await updateSignRequest(request);
+  await markSignersReminded(
+    request.id,
+    delivered.map((signer) => signer.id),
+    new Date()
+  );
 
   return {
     sent: delivered.length,
@@ -617,12 +626,15 @@ export async function getSession(
   }
 
   if (signer.status === "pending") {
-    signer.status = "viewed";
-    signer.viewedAt = new Date();
-    if (request.status === "pending") {
-      request.status = "in_progress";
-    }
-    await updateSignRequest(request);
+    await updateSigner(
+      request.id,
+      signer.id,
+      { status: "viewed", viewedAt: new Date() },
+      { fromStatuses: ["pending"], requestStatus: "in_progress" }
+    );
+    // Reloaded either way: no match means another tab got there first, or it was just voided.
+    const latest = await loadRequest(id);
+    return toCeremonySession(latest, requireSigner(latest, recipientId, token));
   }
 
   return toCeremonySession(request, signer);
@@ -699,6 +711,11 @@ export async function saveFieldValues(
     return { field, fieldId, value: normalizeFieldValue(field, value) };
   });
 
+  // Checked now, while the signer is here to fix it. Found only when the last signer finishes,
+  // a bad image would block the whole envelope. One signature often fills several boxes.
+  const images = entries.filter(({ field }) => isDrawnField(field.type)).map(({ value }) => value);
+  await Promise.all([...new Set(images)].map(assertStampableImage));
+
   await setFieldValues(request.id, entries.map(({ fieldId, value }) => ({ fieldId, value })));
 
   return entries.map(({ field, value }) => ({
@@ -737,34 +754,53 @@ export async function completeSigning(
   }
 
   const now = new Date();
-  signer.status = "signed";
-  signer.signedAt = now;
-  // A signer who never opened the landing screen still counts as having viewed it.
-  signer.viewedAt = signer.viewedAt ?? now;
+  const previous = { status: signer.status, viewedAt: signer.viewedAt };
 
-  const everyoneSigned = request.signers.every((item) => item.status === "signed");
-  request.status = everyoneSigned ? "completed" : "in_progress";
-  if (everyoneSigned) request.completedAt = now;
+  const updated = await updateSigner(
+    request.id,
+    signer.id,
+    // A signer who never opened the landing screen still counts as having viewed it.
+    { status: "signed", signedAt: now, viewedAt: signer.viewedAt ?? now },
+    { fromStatuses: ["pending", "viewed"], requestStatus: "in_progress" }
+  );
+  if (!updated) throw envelopeMovedOn();
 
-  if (everyoneSigned) {
-    const pdf = await getFileBuffer(request.pdfFileId);
-    const signed = await stampSignatures(pdf, request.signatureFields);
-    request.signedPdfFileId = await saveDocumentFile(
+  if (!updated.signers.every((item) => item.status === "signed")) {
+    return { waitingForOthers: true, downloadUrl: null };
+  }
+
+  // Only the signer whose write left everyone signed gets here. The envelope is marked complete
+  // after the signed PDF is stored, so nobody told it is complete can fetch a missing file.
+  let completed: SignRequest | null;
+  try {
+    const pdf = await getFileBuffer(updated.pdfFileId);
+    const signed = await stampSignatures(pdf, updated.signatureFields);
+    const signedPdfFileId = await saveDocumentFile(
       signed,
-      pdfFileName(request.fileName),
+      pdfFileName(updated.fileName),
       "application/pdf"
     );
+    completed = await closeSignRequest(updated.id, "completed", {
+      signedPdfFileId,
+      completedAt: now,
+    });
+  } catch (error) {
+    // Otherwise this signer could never retry, and the envelope would stay stuck unfinished.
+    await updateSigner(
+      updated.id,
+      signer.id,
+      { status: previous.status, signedAt: null, viewedAt: previous.viewedAt },
+      { fromStatuses: ["signed"] }
+    );
+    throw error;
   }
+  if (!completed) throw envelopeMovedOn();
 
-  await updateSignRequest(request);
-
-  if (everyoneSigned) {
-    await sendCompletionNotices(request);
-  }
+  await sendCompletionNotices(completed);
 
   return {
-    waitingForOthers: !everyoneSigned,
-    downloadUrl: everyoneSigned ? buildDocumentUrl(request.id, signer.token) : null,
+    waitingForOthers: false,
+    downloadUrl: buildDocumentUrl(completed.id, signer.token),
   };
 }
 
@@ -776,13 +812,28 @@ export async function declineSigning(
 ): Promise<{ ok: true }> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
-  signer.status = "declined";
-  signer.declineReason = reason;
-  signer.declinedAt = new Date();
-  request.status = "declined";
-  await updateSignRequest(request);
 
-  await sendDeclineNotices(request, signer, reason);
+  const updated = await updateSigner(
+    request.id,
+    signer.id,
+    { status: "declined", declineReason: reason, declinedAt: new Date() },
+    { fromStatuses: ["pending", "viewed"], requestStatus: "declined" }
+  );
+  if (!updated) throw envelopeMovedOn();
+
+  await sendDeclineNotices(updated, requireDeclinedSigner(updated, signer.id), reason);
 
   return { ok: true };
+}
+
+/** The signer's copy from after the write, which carries the reason the notices include. */
+function requireDeclinedSigner(request: SignRequest, signerId: string): Signer {
+  const signer = request.signers.find((item) => item.id === signerId);
+  if (!signer) throw new AppError("Sign request not found", 404, "NOT_FOUND");
+  return signer;
+}
+
+/** The envelope changed between loading it and writing: it was voided, declined or finished. */
+function envelopeMovedOn(): AppError {
+  return new AppError("This envelope has changed and is no longer open.", 409, "ENVELOPE_CLOSED");
 }

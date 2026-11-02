@@ -11,11 +11,7 @@ import {
 import { AppError } from "../../utils/appError";
 import { asyncHandler } from "../../utils/async-handler";
 import { generateToken, verifyToken, verifyTokenIgnoreExpiry } from "../../utils/jwt";
-import {
-  createOrgSession,
-  findOrgSession,
-  updateOrgSession,
-} from "./org-session.repository";
+import { findOrgSession, updateOrgSession } from "./org-session.repository";
 
 /**
  * Salesforce sign-in, ported from `360_File_Connector_Node/src/controllers/authController.js`.
@@ -30,7 +26,7 @@ import {
  *   Admin    getToken -> Salesforce -> handleCallback
  *   Add-in   (its own PKCE) -> exchangeToken
  *
- * `exchangeToken` refuses an org that has never been through `getToken`: an org is enabled
+ * `exchangeToken` refuses an org that has never been through the admin flow: an org is enabled
  * by an admin authorising it, not by whoever opens the add-in first.
  */
 
@@ -111,13 +107,13 @@ export const refreshToken = asyncHandler(async (req: Request, res: Response) => 
  * Returns the authorize URL to open. PKCE, with the verifier carried in `state` so the
  * callback can complete the exchange without a server-side record.
  *
- * `orgId` is optional. Salesforce knows its own org and sends it, and gets a JWT back for
- * that org straight away. The console has no org id before anyone has signed in, so it omits
- * the field and receives only the URL — `handleCallback` creates the row from the identity
- * Salesforce returns, and hands the JWT back through the popup.
+ * Unlike the connector's, this issues no JWT. Anyone can call it, so a JWT here would be valid
+ * for any org id they named. `handleCallback` creates the row from the identity Salesforce
+ * returns, and hands the JWT back through the popup. Salesforce itself does not call this: it
+ * reaches this service with the connector's token, through `authenticateTokenV1`.
  */
 export const getToken = asyncHandler(async (req: Request, res: Response) => {
-  const { environmentType, orgId, instanceUrl, username } = req.body ?? {};
+  const { environmentType } = req.body ?? {};
 
   if (!environmentType) {
     throw new AppError("Missing required field: environmentType", 400);
@@ -146,21 +142,7 @@ export const getToken = asyncHandler(async (req: Request, res: Response) => {
 
   const authUrl = `${getLoginUrl(environmentType)}/services/oauth2/authorize?${params}`;
 
-  if (!orgId) {
-    return res.json({ authUrl });
-  }
-
-  await createOrgSession({
-    org_id: orgId,
-    loginTypeSF: environmentType,
-    instance_url: instanceUrl,
-    username,
-  });
-
-  return res.json({
-    jwt: generateToken({ orgId, environmentType, instanceUrl: instanceUrl ?? null }),
-    authUrl,
-  });
+  return res.json({ authUrl });
 });
 
 /**

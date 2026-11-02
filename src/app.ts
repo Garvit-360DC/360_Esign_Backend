@@ -12,6 +12,8 @@ export function createApp() {
   const app = express();
 
   app.disable("x-powered-by");
+  // One proxy in front. Without this, rate limiting sees the proxy's address for every user.
+  app.set("trust proxy", 1);
   app.use(
     helmet({
       crossOriginResourcePolicy: { policy: "cross-origin" },

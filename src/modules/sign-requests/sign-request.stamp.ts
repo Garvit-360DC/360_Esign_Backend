@@ -42,6 +42,41 @@ function decodeSignature(value: string, label: string): Buffer {
   return buffer;
 }
 
+/** Several boxes can hold this, and every value lives in one size-limited database document. */
+const MAX_SIGNATURE_IMAGE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Throws unless stamping could use this image, by doing the same embed into a scratch PDF.
+ * Run when a signer saves it, so a bad image is reported to them and not at stamping time.
+ */
+export async function assertStampableImage(value: string): Promise<void> {
+  const bytes = decodeSignature(value, "Signature");
+
+  if (bytes.length > MAX_SIGNATURE_IMAGE_BYTES) {
+    throw new AppError(
+      "That signature image is too large. Please use one under 2 MB.",
+      400,
+      "INVALID_SIGNATURE_IMAGE"
+    );
+  }
+
+  const kind = detectImageType(bytes);
+  if (!kind) {
+    throw new AppError("Signature: must be a PNG or JPEG image.", 400, "INVALID_SIGNATURE_IMAGE");
+  }
+
+  const scratch = await PDFDocument.create();
+  try {
+    await (kind === "png" ? scratch.embedPng(bytes) : scratch.embedJpg(bytes));
+  } catch {
+    throw new AppError(
+      "Signature: could not read the signature image.",
+      400,
+      "INVALID_SIGNATURE_IMAGE"
+    );
+  }
+}
+
 /**
  * Normalized top-left coordinates to PDF points measured up from the bottom. Screens
  * measure down from the top; PDFs measure up from the bottom. Convert once, here.

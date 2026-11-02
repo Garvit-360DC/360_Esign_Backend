@@ -2,6 +2,7 @@ node_modules/
 dist/
 logs/
 .env
+ngrok.yml
 *.p12
 *.pem
 out/
