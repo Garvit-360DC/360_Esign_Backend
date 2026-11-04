@@ -3,6 +3,7 @@ import express from "express";
 import helmet from "helmet";
 import { errorMiddleware, unknownRoute } from "./middleware/error.middleware";
 import { rateLimitMiddleware } from "./middleware/rate-limit.middleware";
+import { requestLogger } from "./middleware/request-logger.middleware";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { envelopeRoutes } from "./modules/envelopes/envelope.routes";
 import { healthRoutes } from "./modules/health/health.routes";
@@ -15,6 +16,7 @@ export function createApp() {
   app.disable("x-powered-by");
   // One proxy in front. Without this, rate limiting sees the proxy's address for every user.
   app.set("trust proxy", 1);
+  app.use(requestLogger);
   app.use(
     helmet({
       crossOriginResourcePolicy: { policy: "cross-origin" },

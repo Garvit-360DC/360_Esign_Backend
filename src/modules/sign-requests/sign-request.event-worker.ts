@@ -112,7 +112,10 @@ export async function deliverDueEvents(now = new Date()): Promise<number> {
     }
 
     try {
-      if (head) await deliver(envelope);
+      if (head) {
+        await deliver(envelope);
+        logger.info("Delivered a status event", { envelopeId: envelope.id, event: head.payload.event });
+      }
       await finishEventDelivery(envelope.id, head?.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

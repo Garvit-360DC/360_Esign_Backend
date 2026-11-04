@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { env } from "../config/env";
+import { logger } from "../config/logger";
 import { findDbToken } from "../modules/auth/org-session.repository";
 import { asyncHandler } from "../utils/async-handler";
 import { decryptJsonDataWithKeys } from "../utils/cryptoGraphy";
@@ -65,12 +66,14 @@ export const authenticateTokenV1 = asyncHandler(
     }
 
     if (!orgId || !productName) {
+      logger.warn("Token refused: the request names no org or product", { orgId, productName });
       res.status(403).json({ message: NOT_AUTHORIZED });
       return;
     }
 
     const tokenExist = await findDbToken(orgId, productName);
     if (!tokenExist) {
+      logger.warn("Token refused: no dbtokens row for this org and product", { orgId, productName });
       res.status(403).json({ message: NOT_AUTHORIZED });
       return;
     }
@@ -89,6 +92,13 @@ export const authenticateTokenV1 = asyncHandler(
       (user.length === 15 || user.length === 18);
 
     if (!allowed) {
+      // The caller is only ever told "not authorized", so this is the one place to see why.
+      const reason = !parseDBToken
+        ? "the stored token could not be read, so check NODE_TOKEN_ENCRYPTION_KEY and IV"
+        : !parseHeaderToken
+          ? "the request's token could not be read, so check NODE_TOKEN_ENCRYPTION_KEY and IV"
+          : "the token does not match this org and product";
+      logger.warn(`Token refused: ${reason}`, { orgId, productName });
       res.status(403).json({ message: NOT_AUTHORIZED });
       return;
     }
