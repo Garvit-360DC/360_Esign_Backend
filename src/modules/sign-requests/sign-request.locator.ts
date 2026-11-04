@@ -405,6 +405,42 @@ export async function countPages(pdf: Buffer): Promise<number> {
   }
 }
 
+/**
+ * What the file holds, whatever a page's drawing operations say: who made it, and the size and
+ * encoding of each stored image, form and pattern. Holds nothing from the document's text.
+ */
+async function describePdf(pdf: Buffer): Promise<Record<string, unknown>> {
+  try {
+    const { PDFDocument, PDFDict, PDFName, PDFStream } = await import("pdf-lib");
+    const document = await PDFDocument.load(new Uint8Array(pdf), {
+      updateMetadata: false,
+      ignoreEncryption: true,
+    });
+    const stored: string[] = [];
+
+    for (const [, object] of document.context.enumerateIndirectObjects()) {
+      const dict = object instanceof PDFStream ? object.dict : object instanceof PDFDict ? object : null;
+      if (!dict) continue;
+
+      const read = (key: string) => dict.get(PDFName.of(key))?.toString();
+      const subtype = read("Subtype");
+      const patternType = read("PatternType");
+
+      if (subtype === "/Image") {
+        stored.push(`image ${read("Width")}x${read("Height")} ${read("Filter") ?? "no filter"} ${read("SMask") ? "with mask" : ""}`.trim());
+      } else if (subtype === "/Form") {
+        stored.push(`form ${read("BBox") ?? ""}`.trim());
+      } else if (patternType) {
+        stored.push(`pattern type ${patternType}`);
+      }
+    }
+
+    return { producer: document.getProducer(), creator: document.getCreator(), stored };
+  } catch (error) {
+    return { describeFailed: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function locatePlaceholders(
   pdf: Buffer,
   expected: DetectedPlaceholder[]
@@ -443,7 +479,6 @@ export async function locatePlaceholders(
         const ops = await page.getOperatorList();
         images.push(...collectImages(ops, OPS, pageNumber, width, height));
         for (const [name, code] of Object.entries(OPS)) {
-          if (!/image|form|pattern|shading/i.test(name)) continue;
           const count = ops.fnArray.filter((fn) => fn === code).length;
           if (count) paintOps[name] = (paintOps[name] ?? 0) + count;
         }
@@ -504,6 +539,7 @@ export async function locatePlaceholders(
         expected: imagePlaceholders.map((item) => `${item.tag} ${item.widthPt}x${item.heightPt}`),
         imagesFound: images.map((item) => `page ${item.page}: ${item.width.toFixed(1)}x${item.height.toFixed(1)}`),
         paintOps,
+        ...(await describePdf(pdf)),
       });
       throw new AppError(
         `Found ${imagePlaceholders.length} signature placeholder${imagePlaceholders.length === 1 ? "" : "s"} in the Word document but ${candidates.length} in the converted PDF. Re-insert the signature boxes with the add-in and try again.`,
