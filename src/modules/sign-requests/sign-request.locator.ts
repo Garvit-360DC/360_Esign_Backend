@@ -426,6 +426,7 @@ export async function locatePlaceholders(
   });
 
   const images: Candidate[] = [];
+  const paintOps: Record<string, number> = {};
   const textHits = new Map<string, Candidate[]>();
   const measure = wantedTags.length ? await loadMeasure() : null;
   let pageCount = 0;
@@ -441,6 +442,11 @@ export async function locatePlaceholders(
       if (imagePlaceholders.length) {
         const ops = await page.getOperatorList();
         images.push(...collectImages(ops, OPS, pageNumber, width, height));
+        for (const [name, code] of Object.entries(OPS)) {
+          if (!/image|form|pattern|shading/i.test(name)) continue;
+          const count = ops.fnArray.filter((fn) => fn === code).length;
+          if (count) paintOps[name] = (paintOps[name] ?? 0) + count;
+        }
       }
 
       if (measure) {
@@ -492,6 +498,13 @@ export async function locatePlaceholders(
       .sort(byReadingOrder);
 
     if (candidates.length !== imagePlaceholders.length) {
+      // The converter decides how a picture is painted, so this shows what it actually produced.
+      logger.warn("Signature pictures not matched in the converted PDF", {
+        pageCount,
+        expected: imagePlaceholders.map((item) => `${item.tag} ${item.widthPt}x${item.heightPt}`),
+        imagesFound: images.map((item) => `page ${item.page}: ${item.width.toFixed(1)}x${item.height.toFixed(1)}`),
+        paintOps,
+      });
       throw new AppError(
         `Found ${imagePlaceholders.length} signature placeholder${imagePlaceholders.length === 1 ? "" : "s"} in the Word document but ${candidates.length} in the converted PDF. Re-insert the signature boxes with the add-in and try again.`,
         400,
