@@ -34,7 +34,8 @@ const dbtokensSchema = new Schema(
     isRefreshing: { type: Boolean, default: false },
     refreshStartedAt: { type: Date, default: null },
   },
-  { timestamps: { createdAt: "createdat", updatedAt: "updatedat" }, collection: "dbtokens" }
+  // The connector's model is named `dbtokensfileConnect`, which Mongoose stores under this name.
+  { timestamps: { createdAt: "createdat", updatedAt: "updatedat" }, collection: "dbtokensfileconnects" }
 );
 
 const DbTokensModel = mongoose.model("dbtokens", dbtokensSchema);

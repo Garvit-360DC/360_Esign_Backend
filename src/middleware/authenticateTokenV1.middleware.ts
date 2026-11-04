@@ -73,7 +73,7 @@ export const authenticateTokenV1 = asyncHandler(
 
     const tokenExist = await findDbToken(orgId, productName);
     if (!tokenExist) {
-      logger.warn("Token refused: no dbtokens row for this org and product", { orgId, productName });
+      logger.warn("Token refused: no dbtokensfileconnects row for this org and product", { orgId, productName });
       res.status(403).json({ message: NOT_AUTHORIZED });
       return;
     }
