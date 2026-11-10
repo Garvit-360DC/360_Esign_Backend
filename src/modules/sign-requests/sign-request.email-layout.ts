@@ -1,35 +1,44 @@
 /**
- * Shared chrome for every Smart Sign email.
+ * Shared chrome for every 360 InstantDocs signing email.
  *
  * Written for email clients, not browsers: table layout, inline styles, no flexbox or grid,
- * no external CSS. The console's typefaces are named first and fall back to system stacks,
- * because most clients will not load a web font.
+ * no external CSS. Typefaces fall back to system stacks, because most clients will not load
+ * a web font.
  *
- * Palette is the admin console's, so an invitation looks like the product it comes from.
+ * Looks like the 360 InstantDocs Salesforce app the request comes from: light grey page,
+ * white rounded card, Salesforce blue for the action.
  */
 
+import { env } from "../../config/env";
+
 export const PALETTE = {
-  ink: "#16233B",
-  paper: "#F5F4EF",
+  ink: "#181818",
+  paper: "#F3F3F3",
   card: "#FFFFFF",
-  verified: "#0E8A6B",
-  verifiedSoft: "#E2F2EC",
-  verifiedLine: "#BFE3D6",
-  pending: "#B7791F",
-  refused: "#B3462E",
-  refusedSoft: "#F8E7E1",
-  rule: "#E5E3DB",
-  ruleSoft: "#EFEDE6",
-  text: "#20242E",
-  muted: "#6E7480",
-  faint: "#9AA0AB",
+  brand: "#0176D3",
+  verified: "#2E844A",
+  verifiedSoft: "#EBF7E6",
+  verifiedLine: "#C8E6C9",
+  pending: "#A96404",
+  refused: "#BA0517",
+  refusedSoft: "#FEF1EE",
+  rule: "#E5E5E5",
+  ruleSoft: "#F3F3F3",
+  text: "#181818",
+  muted: "#5C5C5C",
+  faint: "#939393",
 } as const;
 
 const UI_FONT =
-  "'Instrument Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
-const DISPLAY_FONT =
-  "'Bricolage Grotesque','Instrument Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
-const MONO_FONT = "'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+  "'Salesforce Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const DISPLAY_FONT = UI_FONT;
+const MONO_FONT = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+
+/**
+ * The cloud mark, served by the signing site. A PNG because most clients will not show SVG.
+ * The name beside it is text, so the header still reads when the client blocks pictures.
+ */
+const LOGO_URL = `${env.FRONTEND_URL.replace(/\/+$/, "")}/brand/instantdocs-mark.png`;
 
 export function escapeHtml(value: string): string {
   return value
@@ -72,7 +81,7 @@ export function metaTable(rows: MetaRow[]): string {
     })
     .join("");
 
-  return `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid ${PALETTE.rule};border-radius:10px;padding:2px 14px;margin:22px 0;">
+  return `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="width:100%;border-collapse:separate;border:1px solid ${PALETTE.rule};border-radius:12px;padding:2px 14px;margin:22px 0;">
     ${cells}
   </table>`;
 }
@@ -81,7 +90,7 @@ export function metaTable(rows: MetaRow[]): string {
  * Table-based button. Outlook renders `border-radius` inconsistently, so the shape
  * degrades to a square block there rather than breaking the layout.
  */
-export function button(href: string, label: string, color = PALETTE.verified): string {
+export function button(href: string, label: string, color: string = PALETTE.brand): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:26px 0 14px;">
     <tr>
       <td align="center" bgcolor="${color}" style="border-radius:8px;">
@@ -141,17 +150,17 @@ export function layout(options: {
   <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="width:100%;background:${PALETTE.paper};padding:24px 12px;">
     <tr>
       <td align="center">
-        <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="width:600px;max-width:100%;background:${PALETTE.card};border:1px solid ${PALETTE.rule};border-radius:14px;overflow:hidden;">
+        <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="width:600px;max-width:100%;background:${PALETTE.card};border:1px solid ${PALETTE.rule};border-radius:16px;overflow:hidden;">
 
           <tr>
-            <td style="background:${PALETTE.ink};padding:18px 28px;">
+            <td style="background:${PALETTE.card};padding:18px 28px;border-bottom:1px solid ${PALETTE.rule};">
               <table role="presentation" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td style="padding-right:10px;">
-                    <span style="display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:8px;background:${PALETTE.verified};font-family:${DISPLAY_FONT};font-size:13px;font-weight:700;color:#ffffff;">S</span>
+                  <td style="padding-right:10px;vertical-align:middle;">
+                    <img src="${LOGO_URL}" width="45" height="28" alt="" style="display:block;width:45px;height:28px;border:0;outline:none;text-decoration:none;" />
                   </td>
-                  <td>
-                    <span style="font-family:${DISPLAY_FONT};font-size:17px;font-weight:600;color:#ffffff;letter-spacing:.2px;">Smart Sign</span>
+                  <td style="vertical-align:middle;">
+                    <span style="font-family:${DISPLAY_FONT};font-size:17px;font-weight:700;color:${PALETTE.ink};letter-spacing:-.1px;">360 InstantDocs</span>
                   </td>
                 </tr>
               </table>
@@ -167,7 +176,7 @@ export function layout(options: {
           </tr>
 
           <tr>
-            <td style="border-top:1px solid ${PALETTE.rule};padding:16px 28px;background:#FBFAF7;">
+            <td style="border-top:1px solid ${PALETTE.rule};padding:16px 28px;background:#FAFAFA;">
               <p style="margin:0;font-family:${UI_FONT};font-size:11.5px;line-height:1.6;color:${PALETTE.faint};">
                 ${escapeHtml(footnote ?? "This link is personal to you. Do not forward it — anyone holding it can sign in your name.")}
               </p>
