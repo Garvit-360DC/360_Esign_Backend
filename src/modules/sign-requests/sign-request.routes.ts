@@ -4,6 +4,7 @@ import { uploadDocument } from "../../middleware/upload.middleware";
 import {
   cancelSignRequest,
   completeSignRequest,
+  consentSignRequest,
   createSignRequest,
   createSignRequestDraft,
   declineSignRequest,
@@ -48,6 +49,7 @@ router.post("/:id/remind", sfAuthMiddleware, remindSignRequest);
 // ---- Signer-facing: authorised by the per-signer token in the link ----
 router.get("/:id/session", getSignRequestSession);
 router.get("/:id/document", getSignRequestDocument);
+router.post("/:id/consent", consentSignRequest);
 // Batch first: the ceremony fills several fields at once, and one request per field races.
 router.put("/:id/fields", saveSignRequestFields);
 router.put("/:id/fields/:fieldId", saveSignRequestField);

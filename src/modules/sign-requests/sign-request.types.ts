@@ -131,10 +131,27 @@ export type FieldRect = {
   height: number;
 };
 
+/** Who did what, from where. Kept for the certificate of completion. */
+export type AuditEntry = {
+  action: "viewed" | "consented" | "signed" | "declined";
+  at: Date;
+  ip: string | null;
+  userAgent: string | null;
+};
+
+/** What the browser's request says about the signer, for the audit trail. */
+export type ClientInfo = {
+  ip?: string | null;
+  userAgent?: string | null;
+};
+
 export type Signer = SignerInput & {
   id: string;
   token: string;
   status: SignerStatus;
+  /** When the signer agreed to sign electronically. Nothing can be saved before it. */
+  consentedAt: Date | null;
+  audit: AuditEntry[];
   /** Why this signer declined. Null until they do. */
   declineReason: string | null;
   /** When this signer first opened the document. */
@@ -143,13 +160,13 @@ export type Signer = SignerInput & {
   declinedAt: Date | null;
   /** When a reminder was last sent to them. Null until the sender nudges them. */
   remindedAt: Date | null;
-  /** Signing step from Salesforce. Stored for sequential sending; everyone is invited at once. */
+  /** Signing step from Salesforce. Stored for sequential sending; everyone is invited at once today. */
   order?: number;
   /** `Signature_Request_Recipient__c` id, echoed back in status callbacks. */
   salesforceRecipientId?: string | null;
 };
 
-export type PublicSigner = Omit<Signer, "token"> & {
+export type PublicSigner = Omit<Signer, "token" | "audit"> & {
   signUrl: string;
 };
 
@@ -361,9 +378,10 @@ export type CeremonySession = {
     estimatedMinutes: number;
     senderName: string;
     senderCompany: string;
+    senderEmail: string;
     consentText: string;
   };
-  recipient: CeremonyRecipient;
+  recipient: CeremonyRecipient & { consentedAt: string | null };
   recipients: CeremonyRecipient[];
   documentUrl: string;
   fields: CeremonyField[];

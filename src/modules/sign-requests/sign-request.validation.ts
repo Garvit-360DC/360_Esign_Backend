@@ -154,10 +154,17 @@ export const saveFieldsBodySchema = ceremonyAuthSchema.extend({
     .max(100, "Too many fields in one request"),
 });
 
-export const completeBodySchema = ceremonyAuthSchema;
+/** `timeZone` only decides how the sign date is written, so a bad one falls back to UTC. */
+export const completeBodySchema = ceremonyAuthSchema.extend({
+  timeZone: z.string().trim().max(64).optional(),
+});
 
 export const declineBodySchema = ceremonyAuthSchema.extend({
-  reason: z.string().trim().min(1, "A reason is required").max(2000),
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Tell the sender why you are declining.")
+    .max(1000, "Keep the reason under 1000 characters."),
 });
 
 export function parseCeremonyAuth(raw: unknown): { recipientId: string; t: string } {
@@ -187,7 +194,9 @@ export function parseSaveFieldsBody(raw: unknown): z.infer<typeof saveFieldsBody
 }
 
 export function parseCompleteBody(raw: unknown): z.infer<typeof completeBodySchema> {
-  return parseCeremonyAuth(raw);
+  const auth = parseCeremonyAuth(raw);
+  const result = completeBodySchema.safeParse(raw);
+  return { ...auth, timeZone: result.success ? result.data.timeZone : undefined };
 }
 
 export function parseDeclineBody(raw: unknown): z.infer<typeof declineBodySchema> {

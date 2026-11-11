@@ -14,6 +14,7 @@ import {
   getDraftPdf,
   getSession,
   list,
+  recordConsent,
   remind,
   saveFieldValue,
   saveFieldValues,
@@ -31,8 +32,14 @@ import {
   parseSendDraftBody,
   parseSignersField,
 } from "./sign-request.validation";
+import type { ClientInfo } from "./sign-request.types";
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/** For the audit trail. `req.ip` honours the one trusted proxy set in app.ts. */
+function clientOf(req: Request): ClientInfo {
+  return { ip: req.ip ?? null, userAgent: req.get("user-agent") ?? null };
+}
 
 /**
  * The uploaded file name reaches this header verbatim. A quote would break out of the
@@ -139,7 +146,13 @@ export const getSignRequestSession = asyncHandler(async (req: Request, res: Resp
     recipientId: req.query.recipientId,
     t: req.query.t,
   });
-  const result = await getSession(req.params.id, recipientId, t);
+  const result = await getSession(req.params.id, recipientId, t, clientOf(req));
+  return sendSuccess(res, result);
+});
+
+export const consentSignRequest = asyncHandler(async (req: Request, res: Response) => {
+  const { recipientId, t } = parseCeremonyAuth(req.body);
+  const result = await recordConsent(req.params.id, recipientId, t, clientOf(req));
   return sendSuccess(res, result);
 });
 
@@ -176,12 +189,21 @@ export const saveSignRequestFields = asyncHandler(async (req: Request, res: Resp
 
 export const completeSignRequest = asyncHandler(async (req: Request, res: Response) => {
   const body = parseCompleteBody(req.body);
-  const result = await completeSigning(req.params.id, body.recipientId, body.t);
+  const result = await completeSigning(req.params.id, body.recipientId, body.t, {
+    timeZone: body.timeZone,
+    client: clientOf(req),
+  });
   return sendSuccess(res, result);
 });
 
 export const declineSignRequest = asyncHandler(async (req: Request, res: Response) => {
   const body = parseDeclineBody(req.body);
-  const result = await declineSigning(req.params.id, body.recipientId, body.t, body.reason);
+  const result = await declineSigning(
+    req.params.id,
+    body.recipientId,
+    body.t,
+    body.reason,
+    clientOf(req)
+  );
   return sendSuccess(res, result);
 });

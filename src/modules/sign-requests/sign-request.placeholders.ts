@@ -1,5 +1,6 @@
 import PizZip from "pizzip";
 import { AppError } from "../../utils/appError";
+import { decodePng, fingerprintOf, type Fingerprint } from "./sign-request.fingerprint";
 import {
   SIGNER_ROLE_PATTERN,
   SIGN_FIELD_TYPES,
@@ -51,8 +52,11 @@ function readExtent(block: string): { widthPt?: number; heightPt?: number } {
   };
 }
 
-function extractImageFields(xml: string): DetectedPlaceholder[] {
-  const fields: DetectedPlaceholder[] = [];
+const EMBED_RE = /\br:embed\s*=\s*["']([^"']+)["']/i;
+
+/** Each picture placeholder, with the relationship id of the image file it shows. */
+function extractImageFields(xml: string): { field: DetectedPlaceholder; embedId: string | null }[] {
+  const fields: { field: DetectedPlaceholder; embedId: string | null }[] = [];
   const drawings = xml.matchAll(DRAWING_RE);
 
   for (const match of drawings) {
@@ -63,16 +67,54 @@ function extractImageFields(xml: string): DetectedPlaceholder[] {
 
     const size = readExtent(block);
     fields.push({
-      role,
-      type: toFieldType(tagMatch[3]),
-      tag: tagMatch[1],
-      source: "image",
-      ...size,
-      index: 0,
+      field: {
+        role,
+        type: toFieldType(tagMatch[3]),
+        tag: tagMatch[1],
+        source: "image",
+        ...size,
+        index: 0,
+      },
+      embedId: block.match(EMBED_RE)?.[1] ?? null,
     });
   }
 
   return fields;
+}
+
+/**
+ * The picture each placeholder shows, as a fingerprint. Held beside the placeholders rather than
+ * on them, because placeholders are stored with the envelope and this is only needed to locate
+ * them once. Missing when the image could not be read; the locator then pairs boxes by order.
+ */
+const pictureFingerprints = new WeakMap<DetectedPlaceholder, Fingerprint>();
+
+export function pictureFingerprintOf(placeholder: DetectedPlaceholder): Fingerprint | undefined {
+  return pictureFingerprints.get(placeholder);
+}
+
+/** `rId4` -> `word/media/image1.png`, from the part's relationships file. */
+function readImageTargets(zip: PizZip, partName: string): Map<string, string> {
+  const targets = new Map<string, string>();
+  const relsName = partName.replace(/^word\//, "word/_rels/") + ".rels";
+  const rels = zip.file(relsName)?.asText();
+  if (!rels) return targets;
+
+  for (const match of rels.matchAll(/<Relationship\b[^>]*>/gi)) {
+    const id = match[0].match(/\bId\s*=\s*["']([^"']+)["']/i)?.[1];
+    const target = match[0].match(/\bTarget\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!id || !target || /TargetMode\s*=\s*["']External/i.test(match[0])) continue;
+    targets.set(id, target.startsWith("/") ? target.slice(1) : `word/${target}`);
+  }
+  return targets;
+}
+
+function fingerprintPicture(zip: PizZip, path: string | undefined): Fingerprint | null {
+  if (!path) return null;
+  const file = zip.file(path);
+  if (!file) return null;
+  const pixels = decodePng(Buffer.from(file.asUint8Array()));
+  return pixels ? fingerprintOf(pixels) : null;
 }
 
 function extractTextFields(
@@ -134,19 +176,27 @@ export function extractSignatureFields(file: Buffer): DetectedPlaceholder[] {
   }
 
   const fields: DetectedPlaceholder[] = [];
+  /** Parallel to `fields`: the image file behind each picture placeholder. */
+  const picturePaths: (string | undefined)[] = [];
   let outsideBody = 0;
 
   for (const name of Object.keys(zip.files)) {
     if (!WORD_PART_RE.test(name) || zip.files[name].dir) continue;
     const xml = zip.file(name)?.asText();
     if (!xml) continue;
-    const imageFields = extractImageFields(xml);
-    const partFields = [...imageFields, ...extractTextFields(xml, imageFields)];
+    const pictures = extractImageFields(xml);
+    const imageFields = pictures.map((picture) => picture.field);
+    const textFields = extractTextFields(xml, imageFields);
 
     if (name === BODY_PART) {
-      fields.push(...partFields);
+      const targets = readImageTargets(zip, name);
+      fields.push(...imageFields, ...textFields);
+      picturePaths.push(
+        ...pictures.map((picture) => (picture.embedId ? targets.get(picture.embedId) : undefined)),
+        ...textFields.map(() => undefined)
+      );
     } else {
-      outsideBody += partFields.length;
+      outsideBody += imageFields.length + textFields.length;
     }
   }
 
@@ -168,5 +218,15 @@ export function extractSignatureFields(file: Buffer): DetectedPlaceholder[] {
     );
   }
 
-  return indexFields(fields);
+  const indexed = indexFields(fields);
+  // Identical boxes share one image file, so each is read once.
+  const byPath = new Map<string, Fingerprint | null>();
+  indexed.forEach((field, i) => {
+    const path = picturePaths[i];
+    if (!path) return;
+    if (!byPath.has(path)) byPath.set(path, fingerprintPicture(zip, path));
+    const fingerprint = byPath.get(path);
+    if (fingerprint) pictureFingerprints.set(field, fingerprint);
+  });
+  return indexed;
 }

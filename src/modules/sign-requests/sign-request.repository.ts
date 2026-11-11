@@ -5,6 +5,7 @@ import type { QueuedEvent } from "./sign-request.events";
 import {
   SIGNER_ROLE_RE,
   SIGN_FIELD_TYPES,
+  type AuditEntry,
   type SignFieldType,
   type SignRequest,
   type SignRequestStatus,
@@ -35,6 +36,21 @@ const signerSchema = new Schema(
     signedAt: { type: Date, default: null },
     declinedAt: { type: Date, default: null },
     remindedAt: { type: Date, default: null },
+    consentedAt: { type: Date, default: null },
+    audit: {
+      type: [
+        new Schema(
+          {
+            action: { type: String, required: true, enum: ["viewed", "consented", "signed", "declined"] },
+            at: { type: Date, required: true },
+            ip: { type: String, default: null },
+            userAgent: { type: String, default: null },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
   },
   { _id: true }
 );
@@ -121,6 +137,8 @@ type SignerDoc = {
   signedAt: Date | null;
   declinedAt: Date | null;
   remindedAt: Date | null;
+  consentedAt?: Date | null;
+  audit?: AuditEntry[];
 };
 
 /** As stored. `type` is optional because documents written before it existed lack it. */
@@ -170,6 +188,8 @@ function toSigner(doc: SignerDoc): Signer {
     signedAt: doc.signedAt ?? null,
     declinedAt: doc.declinedAt ?? null,
     remindedAt: doc.remindedAt ?? null,
+    consentedAt: doc.consentedAt ?? null,
+    audit: doc.audit ?? [],
   };
 }
 
@@ -268,7 +288,8 @@ export async function createSignRequest(data: {
   pdfFileId: string;
   pageCount: number;
   mimeType: string;
-  signers: Omit<Signer, "id">[];
+  /** Consent and the audit trail start empty, so callers creating an envelope need not set them. */
+  signers: Omit<Signer, "id" | "consentedAt" | "audit">[];
   signatureFields: SignatureField[];
   status?: SignRequestStatus;
   subject?: string | null;
@@ -487,10 +508,16 @@ export async function getStats(now: Date, orgId: string): Promise<SignRequestSta
  * `signatureFields` array back would overwrite whatever landed in between, which silently
  * loses signatures.
  */
+/**
+ * Only while the envelope is open and `signerId` has not finished. Checked in the same write, so
+ * a second tab cannot change a value after the signer finished or after the PDF was stamped.
+ * Returns null when nothing matched.
+ */
 export async function setFieldValues(
   id: string,
+  signerId: string,
   values: { fieldId: string; value: string }[]
-): Promise<SignRequest> {
+): Promise<SignRequest | null> {
   // One filter identifier per field, so duplicates in the input would collide.
   const unique = [...new Map(values.map((entry) => [entry.fieldId, entry.value])).entries()];
 
@@ -500,17 +527,17 @@ export async function setFieldValues(
     return { [`f${index}.id`]: fieldId };
   });
 
-  const updated = await SignRequestModel.findByIdAndUpdate(
-    id,
+  const updated = await SignRequestModel.findOneAndUpdate(
+    {
+      _id: id,
+      status: { $in: OPEN_STATUSES },
+      signers: { $elemMatch: { _id: signerId, status: { $in: ["pending", "viewed"] } } },
+    },
     { $set },
     { new: true, arrayFilters }
   ).lean();
 
-  if (!updated) {
-    throw new AppError("Sign request not found", 404, "NOT_FOUND");
-  }
-
-  return toSignRequest(updated as SignRequestDoc);
+  return updated ? toSignRequest(updated as SignRequestDoc) : null;
 }
 
 const OPEN_STATUSES: SignRequestStatus[] = ["pending", "in_progress"];
@@ -528,7 +555,7 @@ function queueEvents(
 }
 
 type SignerPatch = Partial<
-  Pick<Signer, "status" | "declineReason" | "viewedAt" | "signedAt" | "declinedAt">
+  Pick<Signer, "status" | "declineReason" | "viewedAt" | "signedAt" | "declinedAt" | "consentedAt">
 >;
 
 /**
@@ -549,6 +576,8 @@ export async function updateSigner(
     events?: QueuedEvent[];
     /** Takes back an event not yet delivered, when the change it described is undone. */
     removeEventId?: string;
+    /** Recorded in the same write as the change it describes. */
+    audit?: AuditEntry;
   }
 ): Promise<SignRequest | null> {
   const $set: Record<string, unknown> = {};
@@ -557,6 +586,11 @@ export async function updateSigner(
   }
   if (options.requestStatus) $set.status = options.requestStatus;
 
+  const update = queueEvents($set, options.events);
+  if (options.audit) {
+    update.$push = { ...(update.$push ?? {}), "signers.$.audit": options.audit };
+  }
+
   const updated = await SignRequestModel.findOneAndUpdate(
     {
       _id: id,
@@ -564,7 +598,7 @@ export async function updateSigner(
       signers: { $elemMatch: { _id: signerId, status: { $in: options.fromStatuses } } },
     },
     {
-      ...queueEvents($set, options.events),
+      ...update,
       ...(options.removeEventId ? { $pull: { pendingEvents: { id: options.removeEventId } } } : {}),
     },
     { new: true }

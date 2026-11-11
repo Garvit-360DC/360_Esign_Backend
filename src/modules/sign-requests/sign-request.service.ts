@@ -5,11 +5,13 @@ import { isMailEnabled } from "../../integrations/mail";
 import { downloadContentVersion, type OrgDetails } from "../../integrations/salesforce";
 import { AppError } from "../../utils/appError";
 import {
+  sendCancellationNotices,
   sendCompletionNotices,
   sendDeclineNotices,
   sendReminders,
   sendSignatureInvites,
 } from "./sign-request.emails";
+import { buildCertificate } from "./sign-request.certificate";
 import { createDraftRecord, deleteDraft, findDraft } from "./sign-request.drafts";
 import { buildEvent, typedValuesFor } from "./sign-request.events";
 import { toSignatureFields } from "./sign-request.layout";
@@ -17,6 +19,7 @@ import { countPages, locatePlaceholders } from "./sign-request.locator";
 import {
   buildDocumentUrl,
   buildDraftDocumentUrl,
+  signedDocumentName,
   toCeremonySession,
   toPublicSignRequest,
 } from "./sign-request.mapper";
@@ -39,7 +42,9 @@ import {
 } from "./sign-request.repository";
 import { FIELD_TYPE_META, isDrawnField, signerLabel } from "./sign-request.types";
 import type {
+  AuditEntry,
   CeremonySession,
+  ClientInfo,
   CreateSignRequestInput,
   DetectedPlaceholder,
   FieldRect,
@@ -162,9 +167,7 @@ function requireDocumentToken(request: SignRequest, token: string): Signer {
   return signer;
 }
 
-function pdfFileName(fileName: string): string {
-  return fileName.replace(/\.docx$/i, "") + ".pdf";
-}
+const pdfFileName = signedDocumentName;
 
 export async function create(input: CreateSignRequestInput): Promise<PublicSignRequest> {
   const detected = extractSignatureFields(input.file);
@@ -376,6 +379,24 @@ export async function getSignedPdf(
   return {
     buffer: await getFileBuffer(request.signedPdfFileId),
     fileName: pdfFileName(request.fileName),
+  };
+}
+
+/** The certificate of completion, for Salesforce to save beside the signed PDF. */
+export async function getCertificate(
+  id: string,
+  orgId: string
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const request = await loadOwnRequest(id, orgId);
+
+  if (request.status !== "completed" || !request.signedPdfFileId) {
+    throw new AppError("This envelope has not been completed yet.", 409, "NOT_COMPLETED");
+  }
+
+  const signed = await getFileBuffer(request.signedPdfFileId);
+  return {
+    buffer: await buildCertificate(request, signed),
+    fileName: `${request.fileName.replace(/\.docx$/i, "")} - Certificate of completion.pdf`,
   };
 }
 
@@ -712,6 +733,11 @@ export async function cancel(
       "ALREADY_DONE"
     );
   }
+
+  // Only an envelope that was ever sent has signers holding a link. A draft went to nobody.
+  if (request.status !== "draft") {
+    await sendCancellationNotices(updated, outstandingSigners(updated), reason);
+  }
   return toPublicSignRequest(updated);
 }
 
@@ -795,27 +821,65 @@ export async function remind(
   };
 }
 
+/** Bounded, because both come from the signer's browser. */
+function auditEntry(action: AuditEntry["action"], at: Date, client: ClientInfo = {}): AuditEntry {
+  return {
+    action,
+    at,
+    ip: client.ip ? client.ip.slice(0, 100) : null,
+    userAgent: client.userAgent ? client.userAgent.slice(0, 500) : null,
+  };
+}
+
+function requireConsent(signer: Signer) {
+  if (!signer.consentedAt) {
+    throw new AppError(
+      "Please agree to sign electronically before you continue.",
+      409,
+      "CONSENT_REQUIRED"
+    );
+  }
+}
+
+/** "11 Nov 2026" in the signer's time zone, or UTC when the zone is missing or unknown. */
+function formatSignDate(date: Date, timeZone?: string): string {
+  const options: Intl.DateTimeFormatOptions = { day: "numeric", month: "short", year: "numeric" };
+  try {
+    return new Intl.DateTimeFormat("en-GB", { ...options, timeZone: timeZone || "UTC" }).format(date);
+  } catch {
+    return new Intl.DateTimeFormat("en-GB", { ...options, timeZone: "UTC" }).format(date);
+  }
+}
+
 export async function getSession(
   id: string,
   recipientId: string,
-  token: string
+  token: string,
+  client: ClientInfo = {}
 ): Promise<CeremonySession> {
   const request = await loadRequest(id);
   const signer = requireSigner(request, recipientId, token);
 
   if (signer.status === "signed") {
-    throw new AppError("You have already completed this document.", 409, "ALREADY_DONE");
+    // A screen rather than a dead end: the signer can still fetch their copy once it exists.
+    throw new AppError("You have already signed this document.", 409, "ALREADY_DONE", {
+      documentName: signedDocumentName(request.fileName),
+      downloadUrl: request.status === "completed" ? buildDocumentUrl(request.id, signer.token) : null,
+      waitingForOthers: request.signers.some((item) => item.status !== "signed"),
+    });
   }
 
   if (signer.status === "pending") {
+    const at = new Date();
     await updateSigner(
       request.id,
       signer.id,
-      { status: "viewed", viewedAt: new Date() },
+      { status: "viewed", viewedAt: at },
       {
         fromStatuses: ["pending"],
         requestStatus: "in_progress",
         events: buildEvent(request, "recipient.viewed", { signer }),
+        audit: auditEntry("viewed", at, client),
       }
     );
     // Reloaded either way: no match means another tab got there first, or it was just voided.
@@ -824,6 +888,28 @@ export async function getSession(
   }
 
   return toCeremonySession(request, signer);
+}
+
+/** The signer agrees to sign electronically. Asked once; asking again changes nothing. */
+export async function recordConsent(
+  id: string,
+  recipientId: string,
+  token: string,
+  client: ClientInfo = {}
+): Promise<{ consentedAt: string }> {
+  const request = await loadRequest(id);
+  const signer = requireActiveSigner(request, recipientId, token);
+  if (signer.consentedAt) return { consentedAt: signer.consentedAt.toISOString() };
+
+  const at = new Date();
+  const updated = await updateSigner(
+    request.id,
+    signer.id,
+    { consentedAt: at },
+    { fromStatuses: ["pending", "viewed"], audit: auditEntry("consented", at, client) }
+  );
+  if (!updated) throw envelopeMovedOn();
+  return { consentedAt: at.toISOString() };
 }
 
 export async function getDocumentPdf(
@@ -888,13 +974,16 @@ export async function saveFieldValues(
 ): Promise<CeremonySession["fields"]> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
+  requireConsent(signer);
 
   const entries = values.map(({ fieldId, value }) => {
     const field = request.signatureFields.find((item) => item.id === fieldId);
     if (!field || field.role !== signer.role) {
       throw new AppError("That field does not belong to this signer.", 403, "INVALID_LINK");
     }
-    return { field, fieldId, value: normalizeFieldValue(field, value) };
+    // The address the invitation went to, whatever the browser sent.
+    const stored = field.type === "email" ? signer.email : normalizeFieldValue(field, value);
+    return { field, fieldId, value: stored };
   });
 
   // Checked now, while the signer is here to fix it. Found only when the last signer finishes,
@@ -902,7 +991,12 @@ export async function saveFieldValues(
   const images = entries.filter(({ field }) => isDrawnField(field.type)).map(({ value }) => value);
   await Promise.all([...new Set(images)].map(assertStampableImage));
 
-  await setFieldValues(request.id, entries.map(({ fieldId, value }) => ({ fieldId, value })));
+  const saved = await setFieldValues(
+    request.id,
+    signer.id,
+    entries.map(({ fieldId, value }) => ({ fieldId, value }))
+  );
+  if (!saved) throw envelopeMovedOn();
 
   return entries.map(({ field, value }) => ({
     id: field.id,
@@ -929,17 +1023,37 @@ export async function saveFieldValue(
 export async function completeSigning(
   id: string,
   recipientId: string,
-  token: string
+  token: string,
+  options: { timeZone?: string; client?: ClientInfo } = {}
 ): Promise<{ waitingForOthers: boolean; downloadUrl: string | null }> {
-  const request = await loadRequest(id);
-  const signer = requireActiveSigner(request, recipientId, token);
-  const ownFields = request.signatureFields.filter((field) => field.role === signer.role);
+  const loaded = await loadRequest(id);
+  const signer = requireActiveSigner(loaded, recipientId, token);
+  requireConsent(signer);
+  const now = new Date();
 
-  if (ownFields.length === 0 || ownFields.some((field) => !field.value)) {
-    throw new AppError("All of your fields must be completed first.", 400, "FIELDS_INCOMPLETE");
+  // Filled here rather than trusted from the browser: the date is the day they finished, not
+  // the day they opened the link, and the email is the address the invitation went to.
+  const autoValues = loaded.signatureFields
+    .filter((field) => field.role === signer.role)
+    .flatMap((field) => {
+      if (field.type === "signDate") return [{ fieldId: field.id, value: formatSignDate(now, options.timeZone) }];
+      if (field.type === "email") return [{ fieldId: field.id, value: signer.email }];
+      if (field.type === "fullName" && !field.value?.trim()) return [{ fieldId: field.id, value: signer.name }];
+      return [];
+    });
+
+  let request = loaded;
+  if (autoValues.length > 0) {
+    const saved = await setFieldValues(loaded.id, signer.id, autoValues);
+    if (!saved) throw envelopeMovedOn();
+    request = saved;
   }
 
-  const now = new Date();
+  const ownFields = request.signatureFields.filter((field) => field.role === signer.role);
+  if (ownFields.length === 0 || ownFields.some((field) => !field.value)) {
+    throw new AppError("Some of your fields are still empty. Fill them in, then finish.", 400, "FIELDS_INCOMPLETE");
+  }
+
   const previous = { status: signer.status, viewedAt: signer.viewedAt };
 
   // Fields this signer saved are read from `request`, loaded after they were saved.
@@ -953,7 +1067,12 @@ export async function completeSigning(
     signer.id,
     // A signer who never opened the landing screen still counts as having viewed it.
     { status: "signed", signedAt: now, viewedAt: signer.viewedAt ?? now },
-    { fromStatuses: ["pending", "viewed"], requestStatus: "in_progress", events: signedEvent }
+    {
+      fromStatuses: ["pending", "viewed"],
+      requestStatus: "in_progress",
+      events: signedEvent,
+      audit: auditEntry("signed", now, options.client),
+    }
   );
   if (!updated) throw envelopeMovedOn();
 
@@ -1016,18 +1135,21 @@ export async function declineSigning(
   id: string,
   recipientId: string,
   token: string,
-  reason: string
+  reason: string,
+  client: ClientInfo = {}
 ): Promise<{ ok: true }> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
+  const at = new Date();
 
   const updated = await updateSigner(
     request.id,
     signer.id,
-    { status: "declined", declineReason: reason, declinedAt: new Date() },
+    { status: "declined", declineReason: reason, declinedAt: at },
     {
       fromStatuses: ["pending", "viewed"],
       requestStatus: "declined",
+      audit: auditEntry("declined", at, client),
       // Both carry the reason: Salesforce overwrites its copy with whatever each one says.
       events: [
         ...buildEvent(request, "recipient.declined", { signer, reason }),

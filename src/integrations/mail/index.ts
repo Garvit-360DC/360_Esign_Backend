@@ -19,6 +19,10 @@ export type MailMessage = {
   /** Plain-text alternative. Improves deliverability and serves text-only clients. */
   text?: string;
   cc?: string | string[];
+  /** Shown as the sender, e.g. "Priya Shah via 360 InstantDocs". The address stays ours. */
+  fromName?: string;
+  /** Where a reply goes. Defaults to MAIL_REPLY_TO. */
+  replyTo?: string;
 };
 
 /** Bounded so a slow SendGrid response cannot hold an API request open indefinitely. */
@@ -56,8 +60,11 @@ export async function sendMail(message: MailMessage): Promise<boolean> {
     configure(env.SENDGRID_API_KEY);
 
     const [response] = await sgMail.send({
-      from: env.SENDGRID_FROM_EMAIL,
-      replyTo: env.MAIL_REPLY_TO || undefined,
+      // Our verified address with the sender's name on it: sending as them would fail SPF.
+      from: message.fromName
+        ? { email: env.SENDGRID_FROM_EMAIL, name: message.fromName }
+        : env.SENDGRID_FROM_EMAIL,
+      replyTo: message.replyTo || env.MAIL_REPLY_TO || undefined,
       to: message.to,
       cc: message.cc,
       subject: message.subject,

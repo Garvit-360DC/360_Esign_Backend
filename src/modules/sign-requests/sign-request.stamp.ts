@@ -143,23 +143,57 @@ const TEXT_PADDING = 2;
 const MAX_TEXT_SIZE = 12;
 const MIN_TEXT_SIZE = 5;
 
+/** The characters WinAnsi adds on top of Latin-1: curly quotes, dashes, the euro sign and so on. */
+const WIN_ANSI_EXTRAS = new Set("€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ");
+
+/** Letters that have no WinAnsi form and do not decompose into one. */
+const TRANSLITERATIONS: Record<string, string> = {
+  Ł: "L", ł: "l", Đ: "D", đ: "d", Ħ: "H", ħ: "h", ı: "i", Ŀ: "L", ŀ: "l", Ŧ: "T", ŧ: "t",
+  "′": "'", "″": '"', "‐": "-", "‑": "-", "‒": "-", "−": "-",
+  " ": " ", " ": " ", " ": " ", " ": " ",
+};
+
+function isWinAnsi(char: string): boolean {
+  const code = char.codePointAt(0) ?? 0;
+  return (code >= 0x20 && code <= 0x7e) || (code >= 0xa0 && code <= 0xff) || WIN_ANSI_EXTRAS.has(char);
+}
+
 /**
- * Helvetica is a WinAnsi font, so anything outside that range would throw on encode.
- * Substitute rather than fail: a signed document with a "?" in a company name beats no
- * signed document at all.
+ * Helvetica is a WinAnsi font, so anything outside it would throw on encode. Each character is
+ * kept if it can be, reduced to its base letter if not ("ą" becomes "a"), and only then replaced.
+ * A signed document with a "?" in a name beats no signed document, but iOS turns every
+ * apostrophe into "’", so that one at least must survive. Scripts such as Chinese or Arabic need
+ * an embedded Unicode font, which this does not have.
  */
-function toWinAnsi(text: string): string {
-  return text.replace(/[^ -ÿ]/g, "?");
+export function toWinAnsi(text: string): string {
+  return Array.from(text.normalize("NFC"))
+    .map((char) => {
+      if (isWinAnsi(char)) return char;
+      if (TRANSLITERATIONS[char]) return TRANSLITERATIONS[char];
+      const base = char.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+      return base && Array.from(base).every(isWinAnsi) ? base : "?";
+    })
+    .join("");
 }
 
 function drawFieldText(page: PDFPage, font: PDFFont, rect: PdfRect, value: string) {
-  const text = toWinAnsi(value);
+  let text = toWinAnsi(value);
   const available = Math.max(rect.width - TEXT_PADDING * 2, 1);
 
   // Start from what the box height allows, then shrink until the text fits its width.
   let size = Math.min(rect.height * 0.72, MAX_TEXT_SIZE);
   while (size > MIN_TEXT_SIZE && font.widthOfTextAtSize(text, size) > available) {
     size -= 0.25;
+  }
+
+  // Still too wide at the smallest size: cut it short with an ellipsis rather than print over
+  // whatever sits next to the box.
+  if (font.widthOfTextAtSize(text, size) > available) {
+    const chars = Array.from(text);
+    while (chars.length > 1 && font.widthOfTextAtSize(`${chars.join("")}…`, size) > available) {
+      chars.pop();
+    }
+    text = `${chars.join("").trimEnd()}…`;
   }
 
   // `drawText` positions the baseline, so centre on the ascender height.

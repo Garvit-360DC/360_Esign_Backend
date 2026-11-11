@@ -1,6 +1,8 @@
 import type { PDFFont } from "pdf-lib";
 import { logger } from "../../config/logger";
 import { AppError } from "../../utils/appError";
+import { fingerprintDistance, fingerprintOf, type Fingerprint, type Pixels } from "./sign-request.fingerprint";
+import { pictureFingerprintOf } from "./sign-request.placeholders";
 import { signerLabel } from "./sign-request.types";
 import type { DetectedPlaceholder, FieldRect } from "./sign-request.types";
 
@@ -80,6 +82,10 @@ type Candidate = Box & {
   pageHeight: number;
   /** The area to erase, when it differs from the field box. Falls back to the box itself. */
   artwork?: Box;
+  /** What pdf.js calls the painted image, or its pixels when they were inlined in the page. */
+  imageRef?: string | Pixels;
+  /** The painted picture, when it could be read. See `sign-request.fingerprint.ts`. */
+  fingerprint?: Fingerprint;
 };
 
 function multiply(a: Matrix, b: Matrix): Matrix {
@@ -191,6 +197,97 @@ async function loadPdfjs() {
   return import("pdfjs-dist/legacy/build/pdf.mjs");
 }
 
+/** pdf.js image kinds that carry 8-bit colour, and how many bytes each pixel takes. */
+const IMAGE_KIND_CHANNELS: Record<number, 3 | 4> = { 2: 3, 3: 4 };
+
+/** Decoded pixels in the shape pdf.js hands them over, or null for any other kind. */
+function asPixels(value: unknown): Pixels | null {
+  const image = value as { width?: number; height?: number; kind?: number; data?: Uint8ClampedArray } | null;
+  const channels = image?.kind ? IMAGE_KIND_CHANNELS[image.kind] : undefined;
+  if (!image?.data || !image.width || !image.height || !channels) return null;
+  return { width: image.width, height: image.height, channels, data: image.data };
+}
+
+type ObjectStore = { get(id: string, callback: (value: unknown) => void): unknown };
+
+/**
+ * The pixels of an image painted on a page that is still loaded. pdf.js resolves images
+ * asynchronously, so this waits briefly; a picture that never arrives just goes unfingerprinted.
+ */
+async function readPagePixels(
+  page: { objs: ObjectStore; commonObjs: ObjectStore },
+  ref: string | Pixels
+): Promise<Pixels | null> {
+  if (typeof ref !== "string") return ref;
+  const store = ref.startsWith("g_") ? page.commonObjs : page.objs;
+  const value = await Promise.race([
+    new Promise<unknown>((resolve) => {
+      try {
+        store.get(ref, resolve);
+      } catch {
+        resolve(null);
+      }
+    }),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), IMAGE_WAIT_MS)),
+  ]);
+  return asPixels(value);
+}
+
+const IMAGE_WAIT_MS = 2000;
+
+/**
+ * Above this a painted picture is not taken for the placeholder it most resembles. Same-picture
+ * pairs come out around 0.01 after conversion; a logo or photo of the same size is far off.
+ */
+const MAX_FINGERPRINT_DISTANCE = 0.12;
+
+/**
+ * Pairs picture placeholders with painted images by what they show, not by their order.
+ *
+ * Placeholders with the same tag share one picture, so they form a group, and only within a
+ * group does order decide: those boxes belong to one signer and ask the same thing. Returns
+ * null when anything needed is missing or the counts do not add up, and the caller falls back
+ * to pairing by order.
+ */
+function pairByPicture(
+  placeholders: DetectedPlaceholder[],
+  candidates: Candidate[]
+): Map<DetectedPlaceholder, Candidate> | null {
+  const groups = new Map<string, { fingerprint: Fingerprint; placeholders: DetectedPlaceholder[]; size: { widthPt: number; heightPt: number } }>();
+
+  for (const placeholder of placeholders) {
+    const fingerprint = pictureFingerprintOf(placeholder);
+    if (!fingerprint) return null;
+    const size = expectedSize(placeholder);
+    const key = `${placeholder.tag}|${size.widthPt}x${size.heightPt}`;
+    const group = groups.get(key) ?? { fingerprint, placeholders: [], size };
+    group.placeholders.push(placeholder);
+    groups.set(key, group);
+  }
+
+  const assigned = new Map<string, Candidate[]>();
+  for (const candidate of candidates) {
+    if (!candidate.fingerprint) return null;
+    let best: { key: string; distance: number } | null = null;
+    for (const [key, group] of groups) {
+      if (!sizeMatches(candidate, group.size.widthPt, group.size.heightPt)) continue;
+      const distance = fingerprintDistance(candidate.fingerprint, group.fingerprint);
+      if (!best || distance < best.distance) best = { key, distance };
+    }
+    // Sized like a placeholder but showing something else: a logo, a photo. Not a box.
+    if (!best || best.distance > MAX_FINGERPRINT_DISTANCE) continue;
+    assigned.set(best.key, [...(assigned.get(best.key) ?? []), candidate]);
+  }
+
+  const pairs = new Map<DetectedPlaceholder, Candidate>();
+  for (const [key, group] of groups) {
+    const matches = (assigned.get(key) ?? []).sort(byReadingOrder);
+    if (matches.length !== group.placeholders.length) return null;
+    group.placeholders.forEach((placeholder, index) => pairs.set(placeholder, matches[index]));
+  }
+  return pairs;
+}
+
 /** Every image painted on the page, with the rect it was painted into. */
 function collectImages(
   ops: { fnArray: number[]; argsArray: unknown[] },
@@ -225,8 +322,10 @@ function collectImages(
 
       const x = ctm[4];
       const top = pageHeight - (ctm[5] + height);
+      const ref = (ops.argsArray[i] as unknown[] | undefined)?.[0];
 
       found.push({
+        imageRef: typeof ref === "string" ? ref : asPixels(ref) ?? undefined,
         page,
         x,
         top,
@@ -477,7 +576,21 @@ export async function locatePlaceholders(
 
       if (imagePlaceholders.length) {
         const ops = await page.getOperatorList();
-        images.push(...collectImages(ops, OPS, pageNumber, width, height));
+        const pageImages = collectImages(ops, OPS, pageNumber, width, height);
+        // Read now, while the page's objects are still loaded. Only pictures sized like a box
+        // are worth it; the rest are left out of the pairing anyway.
+        for (const image of pageImages) {
+          const sized = imagePlaceholders.some((placeholder) => {
+            const { widthPt, heightPt } = expectedSize(placeholder);
+            return sizeMatches(image, widthPt, heightPt);
+          });
+          if (!sized || !image.imageRef) continue;
+          const pixels = await readPagePixels(page as never, image.imageRef);
+          const fingerprint = pixels ? fingerprintOf(pixels) : null;
+          if (fingerprint) image.fingerprint = fingerprint;
+          image.imageRef = undefined;
+        }
+        images.push(...pageImages);
         for (const [name, code] of Object.entries(OPS)) {
           const count = ops.fnArray.filter((fn) => fn === code).length;
           if (count) paintOps[name] = (paintOps[name] ?? 0) + count;
@@ -520,9 +633,31 @@ export async function locatePlaceholders(
 
   const located = new Map<DetectedPlaceholder, LocatedPlaceholder>();
 
-  // Images all share one artwork, so they can only be told apart by document order.
-  // Keep the ones sized like a placeholder and pair them up in reading order.
   if (imagePlaceholders.length) {
+    const sized = images.filter((candidate) =>
+      imagePlaceholders.some((placeholder) => {
+        const { widthPt, heightPt } = expectedSize(placeholder);
+        return sizeMatches(candidate, widthPt, heightPt);
+      })
+    );
+
+    // First by what each picture shows, so a signature table laid out in columns cannot hand one
+    // signer's box to another.
+    const byPicture = pairByPicture(imagePlaceholders, sized);
+    if (byPicture) {
+      for (const [placeholder, candidate] of byPicture) located.set(placeholder, toLocated(candidate));
+    } else {
+      logger.warn("Placeholders paired by order: their pictures could not be matched", {
+        expected: imagePlaceholders.length,
+        sized: sized.length,
+        fingerprinted: sized.filter((candidate) => candidate.fingerprint).length,
+      });
+    }
+  }
+
+  // Fallback: document order against reading order. Right for boxes laid out down the page,
+  // wrong for side-by-side columns, which is why pictures are compared first.
+  if (imagePlaceholders.length && located.size === 0) {
     const candidates = images
       .filter((candidate) =>
         imagePlaceholders.some((placeholder) => {

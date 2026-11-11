@@ -9,6 +9,7 @@ import {
   createEnvelope,
   getEnvelopeCertificate,
   getEnvelopeSignedPdf,
+  remindEnvelope,
   sendEnvelope,
   voidEnvelope,
 } from "./envelope.controller";
@@ -62,12 +63,14 @@ router.use("/health", healthRoutes);
 
 router.post("/envelopes", authenticateTokenV1, createEnvelope);
 router.post("/envelopes/:id/send", authenticateTokenV1, sendEnvelope);
+router.post("/envelopes/:id/remind", authenticateTokenV1, remindEnvelope);
 router.post("/envelopes/:id/void", authenticateTokenV1, voidEnvelope);
 router.get("/envelopes/:id/signed-pdf", authenticateTokenV1, getEnvelopeSignedPdf);
 router.get("/envelopes/:id/certificate", authenticateTokenV1, getEnvelopeCertificate);
 
 router.use((req: Request, _res: Response, next: NextFunction) => {
-  next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404, "NOT_FOUND"));
+  // The path only: a query string can carry a signing token.
+  next(new AppError(`Can't find ${req.path} on this server!`, 404, "NOT_FOUND"));
 });
 router.use(v1ErrorMiddleware);
 

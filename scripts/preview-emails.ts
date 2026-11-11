@@ -29,6 +29,7 @@ async function main() {
     buildReminders,
     buildCompletionNotices,
     buildDeclineNotices,
+    buildCancellationNotices,
   } = await import("../src/modules/sign-requests/sign-request.emails");
   const type = await import("../src/modules/sign-requests/sign-request.types");
 
@@ -53,6 +54,8 @@ async function main() {
     signedAt: status === "signed" ? now : null,
     declinedAt: null,
     remindedAt: null,
+    consentedAt: null,
+    audit: [],
   });
 
   const request = {
@@ -82,9 +85,18 @@ async function main() {
     completedAt: null,
     createdAt: now,
     updatedAt: now,
+    // What Salesforce sends, so the emails show who asked.
+    salesforce: {
+      productName: null,
+      documentVersionId: "068000000000000",
+      callbackUrl: "https://example.my.salesforce.com/services/apexrest/instantsign/events",
+      branding: { senderName: "Priya Shah", senderEmail: "priya.shah@example.com", companyName: "Northwind Labs" },
+    },
   };
 
   const decliner = request.signers[1];
+  const declineNotices = buildDeclineNotices(request, decliner, "The payment terms in section 4 need revising before I can sign.");
+  const completion = buildCompletionNotices(request);
 
   const files: { name: string; html: string; subject: string }[] = [
     ...buildSignatureInvites(request).slice(0, 1).map((message) => ({
@@ -102,18 +114,17 @@ async function main() {
       html: message.html,
       subject: message.subject,
     })),
-    ...buildCompletionNotices(request).slice(0, 1).map((message) => ({
-      name: "3-completed.html",
+    { name: "3-completed.html", html: completion[0].html, subject: completion[0].subject },
+    { name: "3b-completed-sender.html", html: completion[completion.length - 1].html, subject: completion[completion.length - 1].subject },
+    // To another signer, to the person who declined, and to the sender.
+    { name: "4-declined.html", html: declineNotices[0].html, subject: declineNotices[0].subject },
+    { name: "4b-declined-confirmation.html", html: declineNotices[declineNotices.length - 2].html, subject: declineNotices[declineNotices.length - 2].subject },
+    { name: "4c-declined-sender.html", html: declineNotices[declineNotices.length - 1].html, subject: declineNotices[declineNotices.length - 1].subject },
+    ...buildCancellationNotices(request, [request.signers[2]], "The client asked for a revised quote.").map((message) => ({
+      name: "5-cancelled.html",
       html: message.html,
       subject: message.subject,
     })),
-    ...buildDeclineNotices(request, decliner, "The payment terms in section 4 need revising before I can sign.")
-      .slice(0, 1)
-      .map((message) => ({
-        name: "4-declined.html",
-        html: message.html,
-        subject: message.subject,
-      })),
   ];
 
   await mkdir(OUT_DIR, { recursive: true });

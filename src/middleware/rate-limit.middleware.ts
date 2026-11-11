@@ -8,7 +8,7 @@ export const rateLimitMiddleware = rateLimit({
   message: {
     success: false,
     error: {
-      message: "Too many requests",
+      message: "Too many attempts in a short time. Wait a few minutes, then try again.",
       code: "RATE_LIMITED",
     },
   },
