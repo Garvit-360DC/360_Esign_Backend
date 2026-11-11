@@ -41,6 +41,13 @@ const envSchema = z.object({
   DEFAULT_APP_NAME: z.string().optional(),
 
   /**
+   * The 360 File Connector, e.g. https://360filesync.360degreeapps.com. When set, an expired
+   * Salesforce token on a connector row is renewed by asking the connector, so its refresh token
+   * is only ever used in one place. Without it this service refreshes the row itself.
+   */
+  FILE_CONNECTOR_URL: z.string().url().optional(),
+
+  /**
    * Each org's callback secret is derived from this. Changing it changes every org's secret.
    * Without it, status events go out unsigned, which Salesforce only accepts from an org with
    * no `Callback_Secret__c`.

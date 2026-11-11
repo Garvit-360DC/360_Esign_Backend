@@ -3,11 +3,13 @@ import { env } from "../../config/env";
 import { logger } from "../../config/logger";
 import {
   acquireRefreshLock,
+  findDbToken,
   findOrgSession,
   releaseRefreshLock,
   updateOrgSession,
 } from "../../modules/auth/org-session.repository";
 import { AppError } from "../../utils/appError";
+import { decryptJsonDataWithKeys } from "../../utils/cryptoGraphy";
 
 /**
  * Salesforce OAuth and REST, ported from the connector's `services/salesforce.js` and
@@ -155,6 +157,74 @@ export async function refreshSalesforceToken(input: {
   }
 }
 
+/** Longer than the connector's own wait for a refresh another request holds, but bounded. */
+const CONNECTOR_TIMEOUT_MS = 30_000;
+
+/**
+ * Asks the file connector for a valid token for a connector row (`POST /v1/sf-access-token`),
+ * authenticating the way Salesforce does: the row's token, decrypted once, with the org and
+ * product headers. The connector refreshes if needed and saves the result to the shared row.
+ *
+ * Returns null when the connector is not configured or cannot be reached, so the caller can
+ * refresh here instead. Throws when the connector says the connection itself has expired,
+ * because refreshing here would fail the same way.
+ */
+async function tokenFromConnector(orgId: string, productName: string): Promise<OrgDetails | null> {
+  if (!env.FILE_CONNECTOR_URL) return null;
+
+  const row = await findDbToken(orgId, productName);
+  const token = row?.token
+    ? decryptJsonDataWithKeys(row.token, env.NODE_TOKEN_ENCRYPTION_KEY, env.NODE_TOKEN_ENCRYPTION_IV)
+    : null;
+  if (!row || !token) {
+    logger.warn("Could not ask the file connector for a token: the org's token could not be read", { orgId, productName });
+    return null;
+  }
+
+  try {
+    const { data } = await axios.post<{ accessToken?: string; instanceUrl?: string | null }>(
+      `${env.FILE_CONNECTOR_URL.replace(/\/+$/, "")}/v1/sf-access-token`,
+      {},
+      {
+        timeout: CONNECTOR_TIMEOUT_MS,
+        headers: { Authorization: `Bearer ${token}`, "org-id": orgId, "product-name": productName },
+      }
+    );
+    if (!data?.accessToken) throw new Error("The connector returned no access token.");
+
+    logger.info("Salesforce token renewed through the file connector", { orgId });
+    return { ...row, accessToken: data.accessToken, instance_url: data.instanceUrl || row.instance_url };
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      throw new AppError(
+        "Salesforce session expired or revoked. Please re-authenticate.",
+        401,
+        "SF_SESSION_EXPIRED"
+      );
+    }
+    logger.warn("The file connector could not provide a token; refreshing here instead", {
+      orgId,
+      status: axios.isAxiosError(error) ? error.response?.status : undefined,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * A valid token for an org whose current one has expired.
+ *
+ * A connector row goes to the connector first, which keeps the refresh token in one place.
+ * Otherwise, or if the connector cannot be reached, it is refreshed here under the shared lock.
+ */
+async function renewToken(orgId: string, productName?: string | null): Promise<OrgDetails> {
+  if (productName) {
+    const fromConnector = await tokenFromConnector(orgId, productName);
+    if (fromConnector) return fromConnector;
+  }
+  return getSalesforceToken(orgId, productName);
+}
+
 /**
  * Refreshes an org's access token once, under a lock.
  *
@@ -206,12 +276,25 @@ async function getSalesforceToken(orgId: string, productName?: string | null): P
   }
 }
 
+/**
+ * True only when Salesforce rejected the access token itself.
+ *
+ * A 401 is not enough: an Apex REST resource can answer 401 on its own, as the InstantSign events
+ * endpoint does for a bad callback signature, and refreshing would not change that answer.
+ * Salesforce's own rejection carries `INVALID_SESSION_ID`, or no JSON body at all.
+ */
 function isExpiredSession(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false;
-  if (error.response?.status === 401) return true;
 
-  const body = error.response?.data as { errorCode?: string }[] | undefined;
-  return Array.isArray(body) && body[0]?.errorCode === "INVALID_SESSION_ID";
+  const body = error.response?.data as unknown;
+  if (Array.isArray(body) && (body[0] as { errorCode?: string } | undefined)?.errorCode === "INVALID_SESSION_ID") {
+    return true;
+  }
+  if (error.response?.status !== 401) return false;
+
+  // An object with its own message is an application's answer, not an expired session.
+  const ownAnswer = typeof body === "object" && body !== null && !Array.isArray(body) && "message" in body;
+  return !ownAnswer;
 }
 
 /**
@@ -249,8 +332,8 @@ export async function sfRequest<T = unknown>(
       throw salesforceError(error, "Salesforce request failed", 401);
     }
 
-    logger.info("Salesforce token expired, refreshing once", { orgId: current.org_id });
-    current = await getSalesforceToken(current.org_id, current.productName);
+    logger.info("Salesforce token expired, renewing once", { orgId: current.org_id });
+    current = await renewToken(current.org_id, current.productName);
     return doCall();
   }
 }
