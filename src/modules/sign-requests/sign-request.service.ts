@@ -34,6 +34,8 @@ import {
   getStats,
   listSignRequests,
   markSignersReminded,
+  releaseInvitation,
+  claimInvitation,
   saveDocumentFile,
   setFieldValues,
   transitionSignRequest,
@@ -168,6 +170,68 @@ function requireDocumentToken(request: SignRequest, token: string): Signer {
 }
 
 const pdfFileName = signedDocumentName;
+
+// ---- signing order ---------------------------------------------------------
+//
+// Salesforce gives each signer a step. On an envelope with `routing: "sequential"` only the lowest
+// step with someone still to sign is invited and may act; signers sharing a step go in any order.
+// The next step is invited when the last signer of the current one finishes.
+
+function stepOf(signer: Signer): number {
+  return signer.order ?? 1;
+}
+
+function isOutstanding(signer: Signer): boolean {
+  return signer.status === "pending" || signer.status === "viewed";
+}
+
+/** The step whose signers may act now. Infinity once nobody is left to sign. */
+function currentStep(request: SignRequest): number {
+  return Math.min(...request.signers.filter(isOutstanding).map(stepOf), Number.POSITIVE_INFINITY);
+}
+
+function isTheirTurn(request: SignRequest, signer: Signer): boolean {
+  return request.routing !== "sequential" || stepOf(signer) <= currentStep(request);
+}
+
+/** Signers who should have an invitation now and do not. */
+function dueSigners(request: SignRequest): Signer[] {
+  const step = currentStep(request);
+  return request.signers.filter(
+    (signer) =>
+      isOutstanding(signer) &&
+      signer.invitedAt === null &&
+      (request.routing !== "sequential" || stepOf(signer) === step)
+  );
+}
+
+/** Refuses a signer whose step has not come yet, naming who they are waiting for. */
+function requireTurn(request: SignRequest, signer: Signer) {
+  if (isTheirTurn(request, signer)) return;
+  const waitingFor = request.signers
+    .filter((other) => isOutstanding(other) && stepOf(other) < stepOf(signer))
+    .map((other) => other.name);
+  throw new AppError(
+    "It is not your turn to sign yet. You will get an email when it is.",
+    409,
+    "NOT_YOUR_TURN",
+    { waitingFor }
+  );
+}
+
+/**
+ * Emails everyone due an invitation, each claimed first so a race cannot send it twice. Returns
+ * who was claimed and which of those SendGrid refused.
+ */
+async function inviteDue(request: SignRequest): Promise<{ invited: Signer[]; failed: Signer[] }> {
+  const at = new Date();
+  const invited: Signer[] = [];
+  for (const signer of dueSigners(request)) {
+    if (await claimInvitation(request.id, signer.id, at)) invited.push({ ...signer, invitedAt: at });
+  }
+  if (invited.length === 0) return { invited, failed: [] };
+  return { invited, failed: await sendSignatureInvites(request, invited) };
+}
 
 export async function create(input: CreateSignRequestInput): Promise<PublicSignRequest> {
   const detected = extractSignatureFields(input.file);
@@ -336,13 +400,20 @@ export async function sendSalesforceEnvelope(id: string, orgId: string): Promise
     );
   }
 
-  const sending = await transitionSignRequest(id, "pending", { fromStatuses: ["draft"] });
+  // Salesforce always names a routing type; anything but parallel follows each signer's step.
+  const routing =
+    (request.salesforce?.routingType ?? "").trim().toUpperCase() === "PARALLEL" ? "parallel" : "sequential";
+
+  const sending = await transitionSignRequest(id, "pending", { fromStatuses: ["draft"], routing });
   if (!sending) {
     return loadOwnRequest(id, orgId);
   }
 
-  const failed = await sendSignatureInvites(sending);
-  if (failed.length === sending.signers.length) {
+  // The first step only, when signing in order; everyone otherwise.
+  const { invited, failed } = await inviteDue(sending);
+  if (invited.length > 0 && failed.length === invited.length) {
+    // Taken back, so sending again invites them rather than finding them already claimed.
+    await Promise.all(invited.map((signer) => releaseInvitation(id, signer.id)));
     await transitionSignRequest(id, "draft", { fromStatuses: ["pending"] });
     throw new AppError(
       "The invitations could not be delivered. Check the mail server settings and try again.",
@@ -770,16 +841,20 @@ export async function remind(
     );
   }
 
-  const outstanding = outstandingSigners(request);
+  // A later step has not been asked yet, so there is nothing to remind them of.
+  const outstanding = outstandingSigners(request).filter((signer) => isTheirTurn(request, signer));
   const targets = recipientId
     ? outstanding.filter((signer) => signer.id === recipientId)
     : outstanding;
 
   if (targets.length === 0) {
+    const named = recipientId ? request.signers.find((signer) => signer.id === recipientId) : undefined;
     throw new AppError(
-      recipientId
-        ? "That signer has already finished, so there is nothing to remind them about."
-        : "Everyone has already signed or declined.",
+      named && isOutstanding(named)
+        ? "It is not that signer's turn yet. They will be emailed when the step before them finishes."
+        : recipientId
+          ? "That signer has already finished, so there is nothing to remind them about."
+          : "Everyone has already signed or declined.",
       409,
       "NOTHING_TO_REMIND"
     );
@@ -869,6 +944,8 @@ export async function getSession(
     });
   }
 
+  requireTurn(request, signer);
+
   if (signer.status === "pending") {
     const at = new Date();
     await updateSigner(
@@ -899,6 +976,7 @@ export async function recordConsent(
 ): Promise<{ consentedAt: string }> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
+  requireTurn(request, signer);
   if (signer.consentedAt) return { consentedAt: signer.consentedAt.toISOString() };
 
   const at = new Date();
@@ -974,6 +1052,7 @@ export async function saveFieldValues(
 ): Promise<CeremonySession["fields"]> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
+  requireTurn(request, signer);
   requireConsent(signer);
 
   const entries = values.map(({ fieldId, value }) => {
@@ -1028,6 +1107,7 @@ export async function completeSigning(
 ): Promise<{ waitingForOthers: boolean; downloadUrl: string | null }> {
   const loaded = await loadRequest(id);
   const signer = requireActiveSigner(loaded, recipientId, token);
+  requireTurn(loaded, signer);
   requireConsent(signer);
   const now = new Date();
 
@@ -1077,6 +1157,17 @@ export async function completeSigning(
   if (!updated) throw envelopeMovedOn();
 
   if (!updated.signers.every((item) => item.status === "signed")) {
+    // Their step may now be done, so the next one gets its invitations. Salesforce moves those
+    // signers to "Sent" itself when it receives this signer's `recipient.signed`.
+    if (updated.routing === "sequential") {
+      const { failed } = await inviteDue(updated);
+      await appendEvents(
+        updated.id,
+        failed.flatMap((next) =>
+          buildEvent(updated, "recipient.bounced", { signer: next, detail: "The invitation could not be delivered." })
+        )
+      );
+    }
     return { waitingForOthers: true, downloadUrl: null };
   }
 
@@ -1140,6 +1231,7 @@ export async function declineSigning(
 ): Promise<{ ok: true }> {
   const request = await loadRequest(id);
   const signer = requireActiveSigner(request, recipientId, token);
+  requireTurn(request, signer);
   const at = new Date();
 
   const updated = await updateSigner(

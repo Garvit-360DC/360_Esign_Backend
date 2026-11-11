@@ -41,6 +41,7 @@ export function toPublicSigner(requestId: string, signer: Signer): PublicSigner 
     declinedAt: signer.declinedAt,
     remindedAt: signer.remindedAt,
     consentedAt: signer.consentedAt,
+    invitedAt: signer.invitedAt,
     signUrl: buildSignUrl(requestId, signer.id, signer.token),
   };
 }

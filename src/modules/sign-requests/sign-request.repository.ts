@@ -37,6 +37,7 @@ const signerSchema = new Schema(
     declinedAt: { type: Date, default: null },
     remindedAt: { type: Date, default: null },
     consentedAt: { type: Date, default: null },
+    invitedAt: { type: Date, default: null },
     audit: {
       type: [
         new Schema(
@@ -97,6 +98,7 @@ const signRequestSchema = new Schema(
     message: { type: String, default: null },
     voidReason: { type: String, default: null },
     salesforce: { type: Schema.Types.Mixed, default: null },
+    routing: { type: String, enum: ["sequential", "parallel", null], default: null },
     // Status events waiting to reach Salesforce, oldest first. See sign-request.events.ts.
     pendingEvents: { type: [Schema.Types.Mixed], default: undefined },
     deadEvents: { type: [Schema.Types.Mixed], default: undefined },
@@ -138,6 +140,7 @@ type SignerDoc = {
   declinedAt: Date | null;
   remindedAt: Date | null;
   consentedAt?: Date | null;
+  invitedAt?: Date | null;
   audit?: AuditEntry[];
 };
 
@@ -152,6 +155,7 @@ type SignRequestDoc = {
   message?: string | null;
   voidReason?: string | null;
   salesforce?: SignRequest["salesforce"];
+  routing?: SignRequest["routing"];
   fileName: string;
   fileId: mongoose.Types.ObjectId;
   pdfFileId: mongoose.Types.ObjectId;
@@ -189,6 +193,7 @@ function toSigner(doc: SignerDoc): Signer {
     declinedAt: doc.declinedAt ?? null,
     remindedAt: doc.remindedAt ?? null,
     consentedAt: doc.consentedAt ?? null,
+    invitedAt: doc.invitedAt ?? null,
     audit: doc.audit ?? [],
   };
 }
@@ -202,6 +207,7 @@ function toSignRequest(doc: SignRequestDoc): SignRequest {
     message: doc.message ?? null,
     voidReason: doc.voidReason ?? null,
     salesforce: doc.salesforce ?? null,
+    routing: doc.routing ?? null,
     fileName: doc.fileName,
     fileId: String(doc.fileId),
     pdfFileId: String(doc.pdfFileId),
@@ -288,8 +294,8 @@ export async function createSignRequest(data: {
   pdfFileId: string;
   pageCount: number;
   mimeType: string;
-  /** Consent and the audit trail start empty, so callers creating an envelope need not set them. */
-  signers: Omit<Signer, "id" | "consentedAt" | "audit">[];
+  /** Consent, invitation and the audit trail start empty, so callers creating an envelope need not set them. */
+  signers: Omit<Signer, "id" | "consentedAt" | "invitedAt" | "audit">[];
   signatureFields: SignatureField[];
   status?: SignRequestStatus;
   subject?: string | null;
@@ -636,6 +642,7 @@ export async function transitionSignRequest(
     signedPdfFileId?: string;
     completedAt?: Date;
     voidReason?: string;
+    routing?: SignRequest["routing"];
     events?: QueuedEvent[];
   } = {}
 ): Promise<SignRequest | null> {
@@ -649,6 +656,7 @@ export async function transitionSignRequest(
           : {}),
         ...(options.completedAt ? { completedAt: options.completedAt } : {}),
         ...(options.voidReason ? { voidReason: options.voidReason } : {}),
+        ...(options.routing ? { routing: options.routing } : {}),
       },
       options.events
     ),
@@ -656,6 +664,27 @@ export async function transitionSignRequest(
   ).lean();
 
   return updated ? toSignRequest(updated as SignRequestDoc) : null;
+}
+
+/**
+ * Marks a signer invited, if nobody has yet. True only for the caller whose write did it, so two
+ * signers finishing a step at the same moment cannot both email the next step.
+ */
+export async function claimInvitation(id: string, signerId: string, at: Date): Promise<boolean> {
+  const updated = await SignRequestModel.findOneAndUpdate(
+    { _id: id, signers: { $elemMatch: { _id: signerId, invitedAt: null } } },
+    { $set: { "signers.$.invitedAt": at } },
+    { projection: { _id: 1 } }
+  ).lean();
+  return Boolean(updated);
+}
+
+/** Takes back an invitation that never went out, so the signer is invited on the next attempt. */
+export async function releaseInvitation(id: string, signerId: string): Promise<void> {
+  await SignRequestModel.updateOne(
+    { _id: id, signers: { $elemMatch: { _id: signerId } } },
+    { $set: { "signers.$.invitedAt": null } }
+  );
 }
 
 /** For events that follow a change already made, such as a failed delivery found while sending. */

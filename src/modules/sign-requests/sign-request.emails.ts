@@ -72,12 +72,23 @@ function senderInbox(request: SignRequest): string | null {
  * rendered and reviewed without an SMTP server — see `scripts/preview-emails.ts`.
  */
 
-/** Each signer gets their own link, so these are always one message per recipient. */
-export function buildSignatureInvites(request: SignRequest): MailMessage[] {
+/**
+ * Whether a signer has had an invitation. On an envelope signed in order, a later step has not,
+ * so a decline or cancellation notice about a document they never received would only confuse.
+ */
+function wasInvited(request: SignRequest, signer: Signer): boolean {
+  return request.routing !== "sequential" || signer.invitedAt !== null;
+}
+
+/**
+ * Each signer gets their own link, so these are always one message per recipient. `signers`
+ * defaults to everyone; an envelope signed in order invites one step at a time.
+ */
+export function buildSignatureInvites(request: SignRequest, signers: Signer[] = request.signers): MailMessage[] {
   const name = documentName(request);
   const asker = senderLine(request);
 
-  return request.signers.map((signer) => {
+  return signers.map((signer) => {
     const href = buildSignUrl(request.id, signer.id, signer.token);
     const label = signerLabel(signer.role);
     // Counts every field they have to touch, not just the signature ones.
@@ -140,9 +151,12 @@ export function buildSignatureInvites(request: SignRequest): MailMessage[] {
 }
 
 /** Returns the signers it could not reach, for callers that must not report a failed send as sent. */
-export async function sendSignatureInvites(request: SignRequest): Promise<Signer[]> {
-  const { results } = await sendAll(buildSignatureInvites(request));
-  return request.signers.filter((_, index) => !results[index]);
+export async function sendSignatureInvites(
+  request: SignRequest,
+  signers: Signer[] = request.signers
+): Promise<Signer[]> {
+  const { results } = await sendAll(buildSignatureInvites(request, signers));
+  return signers.filter((_, index) => !results[index]);
 }
 
 /** Whole days since a date, for "waiting 3 days" phrasing. */
@@ -323,7 +337,9 @@ export function buildDeclineNotices(
   reason: string
 ): MailMessage[] {
   const name = documentName(request);
-  const others = request.signers.filter((signer) => signer.id !== decliner.id);
+  const others = request.signers.filter(
+    (signer) => signer.id !== decliner.id && wasInvited(request, signer)
+  );
   const declinedBy: MetaRow = {
     label: "Declined by",
     value: `${decliner.name} · ${signerLabel(decliner.role)}`,
@@ -453,5 +469,6 @@ export async function sendCancellationNotices(
   signers: Signer[],
   reason?: string | null
 ): Promise<void> {
-  if (signers.length) await sendAll(buildCancellationNotices(request, signers, reason));
+  const invited = signers.filter((signer) => wasInvited(request, signer));
+  if (invited.length) await sendAll(buildCancellationNotices(request, invited, reason));
 }

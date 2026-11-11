@@ -151,6 +151,11 @@ export type Signer = SignerInput & {
   status: SignerStatus;
   /** When the signer agreed to sign electronically. Nothing can be saved before it. */
   consentedAt: Date | null;
+  /**
+   * When their invitation was sent. On an envelope signed in order a later step stays null until
+   * the step before it finishes. Null on envelopes sent before invitations were recorded.
+   */
+  invitedAt: Date | null;
   audit: AuditEntry[];
   /** Why this signer declined. Null until they do. */
   declineReason: string | null;
@@ -160,7 +165,7 @@ export type Signer = SignerInput & {
   declinedAt: Date | null;
   /** When a reminder was last sent to them. Null until the sender nudges them. */
   remindedAt: Date | null;
-  /** Signing step from Salesforce. Stored for sequential sending; everyone is invited at once today. */
+  /** Signing step from Salesforce. Signers sharing a step sign in any order between themselves. */
   order?: number;
   /** `Signature_Request_Recipient__c` id, echoed back in status callbacks. */
   salesforceRecipientId?: string | null;
@@ -213,6 +218,11 @@ export type SignRequest = {
   message?: string | null;
   voidReason?: string | null;
   salesforce?: SalesforceEnvelopeInfo | null;
+  /**
+   * "sequential": only the lowest unfinished step is invited and can sign. Set when the envelope is
+   * sent; absent means everyone was invited at once, as on envelopes sent before this existed.
+   */
+  routing?: "sequential" | "parallel" | null;
   fileName: string;
   fileId: string;
   pdfFileId: string;

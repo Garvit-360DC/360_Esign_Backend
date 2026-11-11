@@ -55,6 +55,7 @@ async function main() {
     declinedAt: null,
     remindedAt: null,
     consentedAt: null,
+    invitedAt: now,
     audit: [],
   });
 
