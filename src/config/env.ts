@@ -59,9 +59,63 @@ const envSchema = z.object({
   SENDGRID_API_KEY: z.string().min(1).optional(),
   SENDGRID_FROM_EMAIL: z.string().min(1).optional(),
   MAIL_REPLY_TO: z.string().optional(),
+
+  // GlobalSign Digital Signing Service. With all four of key, secret, client certificate and
+  // client key set, every completed PDF is sealed with a GlobalSign certificate (PAdES), so
+  // Acrobat shows it as signed by a trusted identity and any later change to it is detectable.
+  // Without them, completed PDFs are stored unsealed, as before.
+  GLOBALSIGN_API_URL: z.string().url().default("https://emea.api.dss.globalsign.com:8443/v2"),
+  GLOBALSIGN_API_KEY: z.string().min(1).optional(),
+  GLOBALSIGN_API_SECRET: z.string().min(1).optional(),
+  /** Paths to the mTLS client certificate and its private key (PEM) from the Atlas portal. */
+  GLOBALSIGN_CLIENT_CERT_PATH: z.string().min(1).optional(),
+  GLOBALSIGN_CLIENT_KEY_PATH: z.string().min(1).optional(),
+  GLOBALSIGN_CLIENT_KEY_PASSPHRASE: z.string().optional(),
+  /**
+   * The certificate's subject, as JSON in the API's `subject_dn` shape, e.g.
+   * {"common_name":"360 InstantDocs"}. Which fields are allowed depends on the account's
+   * validation policy (`npm run globalsign:check` prints it). Fields the policy fixes are
+   * filled by GlobalSign and must be left out.
+   */
+  GLOBALSIGN_SUBJECT_DN: z
+    .string()
+    .default("{}")
+    .transform((value, ctx) => {
+      try {
+        const parsed: unknown = JSON.parse(value);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Reported below.
+      }
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "must be a JSON object" });
+      return z.NEVER;
+    }),
 });
 
-const parsed = envSchema.safeParse(process.env);
+const GLOBALSIGN_REQUIRED = [
+  "GLOBALSIGN_API_KEY",
+  "GLOBALSIGN_API_SECRET",
+  "GLOBALSIGN_CLIENT_CERT_PATH",
+  "GLOBALSIGN_CLIENT_KEY_PATH",
+] as const;
+
+const parsed = envSchema
+  .superRefine((values, ctx) => {
+    // Half a GlobalSign setup would silently produce unsealed PDFs; refuse to start instead.
+    const set = GLOBALSIGN_REQUIRED.filter((key) => values[key]);
+    if (set.length > 0 && set.length < GLOBALSIGN_REQUIRED.length) {
+      for (const key of GLOBALSIGN_REQUIRED.filter((name) => !values[name])) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: "is required when any GlobalSign setting is set",
+        });
+      }
+    }
+  })
+  .safeParse(process.env);
 
 if (!parsed.success) {
   const details = parsed.error.flatten().fieldErrors;

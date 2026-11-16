@@ -25,6 +25,7 @@ import {
 } from "./sign-request.mapper";
 import { detectSignatureFields, extractSignatureFields } from "./sign-request.placeholders";
 import { assertStampableImage, erasePlaceholders, stampSignatures } from "./sign-request.stamp";
+import { isSealingEnabled, sealPdf } from "./sign-request.seal";
 import {
   appendEvents,
   createSignRequest,
@@ -1202,7 +1203,11 @@ export async function completeSigning(
  */
 async function stampAndComplete(request: SignRequest, now: Date): Promise<SignRequest | null> {
   const pdf = await getFileBuffer(request.pdfFileId);
-  const signed = await stampSignatures(pdf, request.signatureFields);
+  const stamped = await stampSignatures(pdf, request.signatureFields);
+  // Sealed last: any change to the file after this, even metadata, would break the seal.
+  // A GlobalSign failure throws, so the last signer can retry instead of the envelope
+  // completing with an unsealed file.
+  const signed = isSealingEnabled() ? await sealPdf(stamped) : stamped;
   const signedPdfFileId = await saveDocumentFile(
     signed,
     pdfFileName(request.fileName),

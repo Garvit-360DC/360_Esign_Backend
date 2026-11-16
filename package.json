@@ -12,11 +12,16 @@
     "mail:test": "tsx scripts/send-test-email.ts",
     "backfill:org": "tsx scripts/backfill-org-id.ts",
     "sf:describe": "tsx scripts/describe-sf-objects.ts",
-    "callback:secret": "tsx scripts/callback-secret.ts"
+    "callback:secret": "tsx scripts/callback-secret.ts",
+    "globalsign:check": "tsx scripts/globalsign-check.ts"
   },
   "dependencies": {
     "@sendgrid/mail": "^8.1.6",
+    "@signpdf/placeholder-pdf-lib": "3.2.6",
+    "@signpdf/signpdf": "3.2.5",
+    "@signpdf/utils": "3.2.4",
     "@types/jsonwebtoken": "^9.0.10",
+    "asn1js": "3.0.5",
     "axios": "^1.19.0",
     "convertapi": "^1.15.0",
     "cors": "^2.8.5",
@@ -30,6 +35,7 @@
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.2.108",
     "pizzip": "^3.2.0",
+    "pkijs": "3.2.4",
     "winston": "^3.17.0",
     "zod": "^3.24.2"
   },
