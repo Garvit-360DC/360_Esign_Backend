@@ -73,6 +73,9 @@ async function main() {
       signer(2, "Rohan Mehta", "rohan.mehta@example.com", "pending"),
       signer(3, "Sanjay Verma", "s.verma@example.com", "pending"),
     ],
+    copyTo: [
+      { id: "65f0000000000000000000c1", key: "cc:legal@example.com", name: "Legal Team", email: "legal@example.com", token: "sample-copy-token" },
+    ],
     signatureFields: [1, 1, 2, 3].map((slot, index) => ({
       id: `signer${slot}_${index}`,
       role: `signer${slot}` as `signer${number}`,
@@ -116,6 +119,9 @@ async function main() {
       subject: message.subject,
     })),
     { name: "3-completed.html", html: completion[0].html, subject: completion[0].subject },
+    ...completion
+      .filter((message) => message.to === "legal@example.com")
+      .map((message) => ({ name: "3c-completed-copy.html", html: message.html, subject: message.subject })),
     { name: "3b-completed-sender.html", html: completion[completion.length - 1].html, subject: completion[completion.length - 1].subject },
     // To another signer, to the person who declined, and to the sender.
     { name: "4-declined.html", html: declineNotices[0].html, subject: declineNotices[0].subject },

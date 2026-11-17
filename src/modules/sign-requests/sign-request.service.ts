@@ -160,13 +160,18 @@ function requireActiveSigner(request: SignRequest, recipientId: string, token: s
   return signer;
 }
 
-function requireDocumentToken(request: SignRequest, token: string): Signer {
+function requireDocumentToken(request: SignRequest, token: string): void {
+  // A copy recipient's link opens the signed document and nothing else.
+  if (request.copyTo.some((copy) => copy.token === token)) {
+    if (request.status === "completed" && request.signedPdfFileId) return;
+    throw new AppError("This signing link is invalid or has expired.", 404, "INVALID_LINK");
+  }
+
   const signer = request.signers.find((item) => item.token === token);
   if (!signer) {
     throw new AppError("This signing link is invalid or has expired.", 404, "INVALID_LINK");
   }
   requireSigner(request, signer.id, token);
-  return signer;
 }
 
 const pdfFileName = signedDocumentName;
@@ -297,6 +302,8 @@ export async function createSalesforceEnvelope(input: {
   subject?: string;
   message?: string;
   signers: (SignerInput & { order: number; salesforceRecipientId?: string })[];
+  /** "Gets a copy" recipients: emailed the signed document when everyone has signed. */
+  copyTo?: { key: string; name: string; email: string }[];
   salesforce: NonNullable<SignRequest["salesforce"]>;
 }): Promise<SignRequest> {
   const { buffer, fileExtension } = await downloadContentVersion(
@@ -372,6 +379,7 @@ export async function createSalesforceEnvelope(input: {
       declinedAt: null,
       remindedAt: null,
     })),
+    copyTo: (input.copyTo ?? []).map((copy) => ({ ...copy, token: newToken() })),
     signatureFields: toSignatureFields(detected, placed.located),
   });
 }

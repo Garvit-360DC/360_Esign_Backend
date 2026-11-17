@@ -6,6 +6,7 @@ import {
   SIGNER_ROLE_RE,
   SIGN_FIELD_TYPES,
   type AuditEntry,
+  type CopyRecipient,
   type SignFieldType,
   type SignRequest,
   type SignRequestStatus,
@@ -85,6 +86,13 @@ const signatureFieldSchema = new Schema<SignatureField>(
   { _id: false }
 );
 
+const copyRecipientSchema = new Schema({
+  key: { type: String, required: true },
+  name: { type: String, required: true },
+  email: { type: String, required: true },
+  token: { type: String, required: true },
+});
+
 const signRequestSchema = new Schema(
   {
     orgId: { type: String, required: true, index: true },
@@ -112,6 +120,7 @@ const signRequestSchema = new Schema(
     pageCount: { type: Number, required: true, default: 1 },
     mimeType: { type: String, required: true },
     signers: { type: [signerSchema], required: true },
+    copyTo: { type: [copyRecipientSchema], default: undefined },
     signatureFields: { type: [signatureFieldSchema], required: true },
     completedAt: { type: Date, default: null },
   },
@@ -163,6 +172,7 @@ type SignRequestDoc = {
   pageCount: number;
   mimeType: string;
   signers: SignerDoc[];
+  copyTo?: (Omit<CopyRecipient, "id"> & { _id: mongoose.Types.ObjectId })[];
   signatureFields: StoredSignatureField[];
   completedAt: Date | null;
   createdAt: Date;
@@ -215,6 +225,13 @@ function toSignRequest(doc: SignRequestDoc): SignRequest {
     pageCount: doc.pageCount,
     mimeType: doc.mimeType,
     signers: doc.signers.map(toSigner),
+    copyTo: (doc.copyTo ?? []).map((copy) => ({
+      id: String(copy._id),
+      key: copy.key,
+      name: copy.name,
+      email: copy.email,
+      token: copy.token,
+    })),
     signatureFields: doc.signatureFields.map((field) => ({
       ...field,
       type: field.type ?? "signature",
@@ -297,6 +314,7 @@ export async function createSignRequest(data: {
   /** Consent, invitation and the audit trail start empty, so callers creating an envelope need not set them. */
   signers: Omit<Signer, "id" | "consentedAt" | "invitedAt" | "audit">[];
   signatureFields: SignatureField[];
+  copyTo?: Omit<CopyRecipient, "id">[];
   status?: SignRequestStatus;
   subject?: string | null;
   message?: string | null;
@@ -315,6 +333,7 @@ export async function createSignRequest(data: {
     pageCount: data.pageCount,
     mimeType: data.mimeType,
     signers: data.signers,
+    ...(data.copyTo?.length ? { copyTo: data.copyTo } : {}),
     signatureFields: data.signatureFields,
   });
 

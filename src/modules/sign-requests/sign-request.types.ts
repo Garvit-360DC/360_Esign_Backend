@@ -175,6 +175,20 @@ export type PublicSigner = Omit<Signer, "token" | "audit"> & {
   signUrl: string;
 };
 
+/**
+ * Someone who gets the signed document but signs nothing ("Gets a copy" in Salesforce). Kept
+ * apart from signers so nothing that counts signers (order, completion, reminders) sees them.
+ */
+export type CopyRecipient = {
+  id: string;
+  /** Salesforce's key for them, `cc:<email>`, echoed back so it can store `id`. */
+  key: string;
+  name: string;
+  email: string;
+  /** Opens the signed document only, and only once the envelope is complete. */
+  token: string;
+};
+
 export type DetectedPlaceholder = {
   role: SignerRole;
   /** Read from the tag: `{%signer1}` is a signature, `{%signer1:initial}` an initial. */
@@ -230,6 +244,8 @@ export type SignRequest = {
   pageCount: number;
   mimeType: string;
   signers: Signer[];
+  /** Emailed the signed document on completion. Empty on envelopes without any. */
+  copyTo: CopyRecipient[];
   signatureFields: SignatureField[];
   /** When the last signer finished. Null until the envelope completes. */
   completedAt: Date | null;
@@ -237,8 +253,9 @@ export type SignRequest = {
   updatedAt: Date;
 };
 
-export type PublicSignRequest = Omit<SignRequest, "signers"> & {
+export type PublicSignRequest = Omit<SignRequest, "signers" | "copyTo"> & {
   signers: PublicSigner[];
+  copyTo: Omit<CopyRecipient, "token">[];
 };
 
 /** A file held for this envelope, as shown in the detail screen's Documents panel. */

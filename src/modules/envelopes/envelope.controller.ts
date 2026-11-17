@@ -24,11 +24,15 @@ function toEnvelopeResponse(request: {
   id: string;
   status: SignRequest["status"];
   signers: { id: string; role: SignerRole }[];
+  copyTo: { id: string; key: string }[];
 }) {
   return {
     id: request.id,
     status: request.status,
-    recipients: request.signers.map((signer) => ({ id: signer.id, roleKey: signer.role })),
+    recipients: [
+      ...request.signers.map((signer) => ({ id: signer.id, roleKey: signer.role })),
+      ...request.copyTo.map((copy) => ({ id: copy.id, roleKey: copy.key })),
+    ],
   };
 }
 
@@ -50,9 +54,8 @@ function assertSupported(body: CreateEnvelopeBody) {
         "VERIFICATION_UNSUPPORTED"
       );
     }
-    if (recipient.role === "CC") {
-      throw new AppError("Copy recipients are not available yet.", 400, "CC_UNSUPPORTED");
-    }
+    // Copy recipients sign nothing, so their key is Salesforce's own ("cc:<email>").
+    if (recipient.role === "CC") continue;
     if (!isSignerRole(recipient.roleKey)) {
       throw new AppError(
         `Signer role "${recipient.roleKey}" must look like signer1, signer2, ...`,
@@ -62,10 +65,24 @@ function assertSupported(body: CreateEnvelopeBody) {
     }
   }
 
-  const roles = body.recipients.map((recipient) => recipient.roleKey);
+  const roles = body.recipients.filter((r) => r.role !== "CC").map((r) => r.roleKey);
   if (new Set(roles).size !== roles.length) {
     throw new AppError("Each signer role must be unique.", 400, "VALIDATION_ERROR");
   }
+  if (roles.length === 0) {
+    throw new AppError("At least one person has to sign.", 400, "VALIDATION_ERROR");
+  }
+}
+
+/** Copy recipients once each: Salesforce keys them by email, so a repeat is the same person. */
+function copyRecipientsOf(body: CreateEnvelopeBody) {
+  const byKey = new Map<string, { key: string; name: string; email: string }>();
+  for (const recipient of body.recipients) {
+    if (recipient.role !== "CC") continue;
+    const key = recipient.roleKey || `cc:${recipient.email.toLowerCase()}`;
+    if (!byKey.has(key)) byKey.set(key, { key, name: recipient.name, email: recipient.email });
+  }
+  return [...byKey.values()];
 }
 
 /** POST /v1/envelopes */
@@ -84,13 +101,16 @@ export const createEnvelope = asyncHandler(async (req: Request, res: Response) =
     documentName: body.documentName,
     subject: body.subject,
     message: body.message,
-    signers: body.recipients.map((recipient) => ({
-      role: recipient.roleKey as SignerRole,
-      name: recipient.name,
-      email: recipient.email,
-      order: recipient.order,
-      salesforceRecipientId: recipient.salesforceRecipientId,
-    })),
+    signers: body.recipients
+      .filter((recipient) => recipient.role !== "CC")
+      .map((recipient) => ({
+        role: recipient.roleKey as SignerRole,
+        name: recipient.name,
+        email: recipient.email,
+        order: recipient.order,
+        salesforceRecipientId: recipient.salesforceRecipientId,
+      })),
+    copyTo: copyRecipientsOf(body),
     salesforce: {
       productName: req.sfConn.productName,
       documentVersionId: body.documentVersionId,
