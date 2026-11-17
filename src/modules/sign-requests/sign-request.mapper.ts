@@ -50,6 +50,7 @@ export function toPublicSignRequest(request: SignRequest): PublicSignRequest {
   return {
     ...request,
     signers: request.signers.map((signer) => toPublicSigner(request.id, signer)),
+    copyTo: request.copyTo.map(({ token: _token, ...recipient }) => recipient),
   };
 }
 

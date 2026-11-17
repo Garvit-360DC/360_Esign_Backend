@@ -287,11 +287,51 @@ export function buildCompletionNotices(request: SignRequest): MailMessage[] {
     };
   });
 
+  const toCopies: MailMessage[] = request.copyTo.map((copy) => {
+    const href = buildDocumentUrl(request.id, copy.token);
+    const from = senderOf(request).name;
+    const lead = from
+      ? `${escapeHtml(from)} asked us to send you a copy of <strong>${escapeHtml(name)}</strong>. Everyone has signed it.`
+      : `You were sent a copy of <strong>${escapeHtml(name)}</strong>. Everyone has signed it.`;
+
+    return {
+      ...fromSender(request),
+      to: copy.email,
+      subject: `Signed copy: ${name}`,
+      html: layout({
+        preheader: `A signed copy of ${name}.`,
+        eyebrow: { text: "Completed", tone: "verified" },
+        heading: "Your copy of the signed document",
+        body:
+          paragraph(lead) +
+          metaTable([
+            ...senderRow(request),
+            { label: "Document", value: name },
+            { label: "Signed by", value: request.signers.map((signer) => signer.name).join(", ") },
+            { label: "Length", value: pageWord(request.pageCount) },
+          ]) +
+          button(href, "Download signed document") +
+          fallbackLink(href),
+        footnote:
+          "You are receiving this because you were added as someone who gets a copy. You don't need to sign anything. Keep this link private.",
+      }),
+      text: plainText([
+        "Your copy of the signed document",
+        "",
+        `${from ? `${from} asked us to send you` : "You were sent"} a copy of ${name}. Everyone has signed it.`,
+        "",
+        "Download the signed document:",
+        href,
+      ]),
+    };
+  });
+
   const inbox = senderInbox(request);
-  if (!inbox) return toSigners;
+  if (!inbox) return [...toSigners, ...toCopies];
 
   return [
     ...toSigners,
+    ...toCopies,
     {
       fromName: PRODUCT_NAME,
       to: inbox,
